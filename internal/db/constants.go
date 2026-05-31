@@ -68,4 +68,7 @@ var ValidIntakeKeys = map[string]bool{
 	"prohibited_directions": true,
 	"author_intent":         true,
 	"selected_tone":         true,
+	"book_form":             true,
+	"narrative_pov":         true,
+	"structure_model":       true,
 }

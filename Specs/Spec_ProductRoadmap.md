@@ -56,6 +56,7 @@ The product must not become a black-box book generator. Users must be able to in
 Required workflow stages:
 
 - Book brief.
+- Outline.
 - Table of contents and chapter shells.
 - Draft.
 - Diagnosis.
@@ -68,6 +69,9 @@ User controls:
 - Skip a stage knowingly.
 - Re-run a stage.
 - Add notes before re-running.
+- Directly edit or override generated output before continuing.
+- Reject generated output and keep the previous version.
+- Accept generated output as the source for the next stage.
 - View the editor or reviewer complaint before deciding whether to act on it.
 - Preserve prior outputs when a stage is re-run.
 
@@ -75,6 +79,16 @@ Default direction:
 
 - Manual cockpit remains the primary trusted workflow.
 - Autopilot remains a shortcut for users who knowingly want to skip review.
+- The default guided flow is intake, Book Brief review, outline review, table-of-contents/chapter shell approval, then drafting.
+- The current build separates Book Brief from outline/table-of-contents generation. A fully separate freeform outline artifact before TOC cards remains a next schema/prompt addition.
+
+Required override model:
+
+- Each major stage should have an editable human-approved artifact.
+- The app should distinguish AI-generated text from user-approved text.
+- Downstream stages should use the latest user-approved artifact, not merely the latest generated artifact.
+- Re-running a stage should create or preserve a prior version rather than destructively overwriting the only copy.
+- The UI should make the next action explicit: approve, edit, regenerate, or continue.
 
 ## 4. Versions And Reviewer Passes
 
@@ -183,4 +197,3 @@ Allowed status labels:
 - `Rejected`
 
 Rejected items must include a short reason and date.
-

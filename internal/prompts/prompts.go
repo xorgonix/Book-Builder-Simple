@@ -64,11 +64,14 @@ func BuildBriefPrompt(project ProjectInput) string {
 USER INTAKE NOTES:
 
 - Book Vector Type: %s
+- Book Form / Genre: %s
 - Core System Topic: %s
 - Target Reader Profile: %s
 - Deep Reader Hunger/Desire: %s
 - Prohibited Directions (What NOT to become): %s
 - Stated Author Tone Target: %s
+- Narrative Point of View: %s
+- Structure / Formula Model: %s
 
 Target Manuscript Scale:
 
@@ -85,11 +88,14 @@ WHAT_IT_IS: [A detailed overview description of the book's delivery framework]
 WHAT_IT_IS_NOT: [Strict boundary constraints directly addressing the Prohibited Directions]
 AI_SUGGESTIONS: [A critical structural evaluation of how to execute this concept across the requested chapter count]`,
 		project.BookType,
+		emptyFallback(project.Intake["book_form"]),
 		project.Intake["core_topic"],
 		project.Intake["target_audience"],
 		project.Intake["reader_hunger"],
 		project.Intake["prohibited_directions"],
 		project.Intake["selected_tone"],
+		emptyFallback(project.Intake["narrative_pov"]),
+		emptyFallback(project.Intake["structure_model"]),
 		TargetWords(project.TargetLength),
 		project.TargetChapters,
 	)
@@ -126,10 +132,33 @@ CHAPTER_END`,
 func BuildEscapeHatchPrompt(project ProjectInput, field string) string {
 	return fmt.Sprintf(`Return three concise, high-quality suggestions for the intake field %q.
 
+Use the current premise, reader, tone, and book shape. Do not return generic filler. Make each suggestion specific enough that a non-writer can choose one and keep moving.
+
+Field-specific guidance: %s
+
 Current project:
 %s
 
-Output only the three suggestions as plain text, one suggestion per line. Do not use markdown bullets or code fences.`, field, formatProject(project))
+Output only the three suggestions as plain text, one suggestion per line. Do not use markdown bullets or code fences.`, field, escapeHatchDirection(field), formatProject(project))
+}
+
+func escapeHatchDirection(field string) string {
+	switch field {
+	case "target_audience":
+		return "Suggest a precise reader archetype or job-to-be-done based on the premise."
+	case "reader_hunger":
+		return "Suggest the concrete pain, curiosity, fear, or aspiration that makes this premise matter."
+	case "prohibited_directions":
+		return "Suggest specific things to avoid: tropes, tone, content, structure, or overused angles."
+	case "book_form":
+		return "Suggest a better-fit book form, genre, or format for the premise."
+	case "narrative_pov":
+		return "Suggest a point of view that fits the premise and reader experience."
+	case "structure_model":
+		return "Suggest a proven structure or formula that fits the book's promise."
+	default:
+		return "Suggest a practical, premise-aware answer that helps the user move forward."
+	}
 }
 
 func BuildDraftPrompt(input ChapterInput) string {
@@ -301,9 +330,12 @@ func ParseTOC(text string, expected int) ([]ChapterPlan, error) {
 	for _, part := range parts[1:] {
 		entry := strings.Split(part, "CHAPTER_END")[0]
 		values := parseLabelBlock(entry, []string{"Order", "Title", "Purpose", "Reader Start", "Reader End"})
-		order, err := strconv.Atoi(strings.TrimSpace(values["Order"]))
+		order, orderRemainder, err := parseOrder(values["Order"])
 		if err != nil || order < 1 {
 			return nil, fmt.Errorf("invalid chapter order in TOC entry %q", values["Order"])
+		}
+		if values["Title"] == "" && orderRemainder != "" {
+			values["Title"] = orderRemainder
 		}
 		if values["Title"] == "" || values["Purpose"] == "" {
 			return nil, fmt.Errorf("TOC entry %d missing title or purpose", order)
@@ -321,6 +353,27 @@ func ParseTOC(text string, expected int) ([]ChapterPlan, error) {
 		return nil, fmt.Errorf("expected %d TOC chapters, got %d", expected, len(plans))
 	}
 	return plans, nil
+}
+
+func parseOrder(value string) (int, string, error) {
+	lines := strings.Split(strings.TrimSpace(value), "\n")
+	if len(lines) == 0 || strings.TrimSpace(lines[0]) == "" {
+		return 0, "", fmt.Errorf("empty order")
+	}
+	fields := strings.Fields(lines[0])
+	if len(fields) == 0 {
+		return 0, "", fmt.Errorf("empty order")
+	}
+	token := strings.Trim(fields[0], ".:)#")
+	order, err := strconv.Atoi(token)
+	if err != nil {
+		return 0, "", err
+	}
+	remainder := strings.TrimSpace(strings.Join(lines[1:], "\n"))
+	if remainder == "" && len(fields) > 1 {
+		remainder = strings.TrimSpace(strings.Join(fields[1:], " "))
+	}
+	return order, remainder, nil
 }
 
 func FormatBrief(brief Brief) string {

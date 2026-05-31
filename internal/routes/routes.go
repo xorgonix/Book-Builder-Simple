@@ -21,6 +21,7 @@ import (
 )
 
 const jobTimeout = 5 * time.Minute
+const autopilotJobTimeout = 90 * time.Minute
 
 type Server struct {
 	app *pocketbase.PocketBase
@@ -33,14 +34,18 @@ func Register(app *pocketbase.PocketBase) {
 	app.OnServe().BindFunc(func(se *core.ServeEvent) error {
 		se.Router.GET("/", s.handleRoot)
 		se.Router.GET("/app/project/{id}/render", s.handleProjectRender)
+		se.Router.GET("/app/project/{id}/chapters/{chapterId}/workspace", s.handleChapterWorkspace)
 		se.Router.GET("/app/project/select", s.handleProjectSelect)
 		se.Router.GET("/app/ui/fragments/intake-nonfiction", s.handleIntakeNonfiction)
 		se.Router.GET("/app/ui/fragments/intake-fiction", s.handleIntakeFiction)
 		se.Router.GET("/api/project/{id}/status", s.handleProjectStatus)
+		se.Router.GET("/api/project/{id}/chapters/{chapterId}/status", s.handleChapterStatus)
 
 		se.Router.POST("/api/projects", s.handleCreateProject)
 		se.Router.POST("/api/project/{id}/intake", s.handleProjectIntake)
 		se.Router.POST("/api/project/{id}/escape-hatch", s.handleEscapeHatch)
+		se.Router.POST("/api/project/{id}/generate/brief", s.handleBrief)
+		se.Router.POST("/api/project/{id}/generate/toc", s.handleTOC)
 		se.Router.POST("/api/project/{id}/generate/blueprint", s.handleBlueprint)
 		se.Router.POST("/api/project/{id}/generate/autopilot", s.handleAutopilot)
 		se.Router.POST("/api/project/{id}/chapters/{chapterId}/pipeline/{stage}", s.handlePipelineStage)
@@ -102,6 +107,14 @@ func (s *Server) handleProjectSelect(e *core.RequestEvent) error {
 	return s.renderGrid(e, http.StatusOK, project, chapter)
 }
 
+func (s *Server) handleChapterWorkspace(e *core.RequestEvent) error {
+	project, chapter, err := s.projectChapterFromPath(e)
+	if err != nil {
+		return e.NotFoundError("chapter not found", err)
+	}
+	return s.renderWorkspace(e, http.StatusOK, project, chapter, "drafting")
+}
+
 func (s *Server) handleProjectIntake(e *core.RequestEvent) error {
 	project, err := s.projectFromPath(e)
 	if err != nil {
@@ -139,6 +152,9 @@ func (s *Server) handleProjectIntake(e *core.RequestEvent) error {
 		"prohibited_directions",
 		"author_intent",
 		"selected_tone",
+		"book_form",
+		"narrative_pov",
+		"structure_model",
 	}
 	for _, key := range keys {
 		value := strings.TrimSpace(e.Request.FormValue(key))
@@ -188,19 +204,44 @@ func (s *Server) handleEscapeHatch(e *core.RequestEvent) error {
 	return e.HTML(http.StatusOK, html)
 }
 
-func (s *Server) handleBlueprint(e *core.RequestEvent) error {
+func (s *Server) handleBrief(e *core.RequestEvent) error {
 	project, err := s.projectFromPath(e)
 	if err != nil {
 		return e.NotFoundError("project not found", err)
 	}
+	job, err := s.createJob(project.Id, "", "brief")
+	if err != nil {
+		return e.InternalServerError("failed to create brief job", err)
+	}
+
+	go s.runJob(project.Id, "", job.Id, "brief")
+
+	return s.renderProcessing(e, "book brief", project.Id, "")
+}
+
+func (s *Server) handleTOC(e *core.RequestEvent) error {
+	project, err := s.projectFromPath(e)
+	if err != nil {
+		return e.NotFoundError("project not found", err)
+	}
+	if _, err := s.briefInput(project.Id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return e.BadRequestError("generate and review the Book Brief before generating the outline", err)
+		}
+		return e.InternalServerError("failed to load book brief", err)
+	}
 	job, err := s.createJob(project.Id, "", "toc")
 	if err != nil {
-		return e.InternalServerError("failed to create blueprint job", err)
+		return e.InternalServerError("failed to create outline job", err)
 	}
 
 	go s.runJob(project.Id, "", job.Id, "toc")
 
-	return s.renderProcessing(e, "blueprint", project.Id, "")
+	return s.renderProcessing(e, "outline and chapter shells", project.Id, "")
+}
+
+func (s *Server) handleBlueprint(e *core.RequestEvent) error {
+	return s.handleTOC(e)
 }
 
 func (s *Server) handleAutopilot(e *core.RequestEvent) error {
@@ -256,22 +297,66 @@ func (s *Server) handleProjectStatus(e *core.RequestEvent) error {
 	}
 	if len(running) > 0 {
 		job := running[0]
-		return s.renderStatus(e, http.StatusOK, job.GetString("job_type"), "running", job.GetString("chapter_id"))
+		stage := job.GetString("job_type")
+		if progress := strings.TrimSpace(job.GetString("error_msg")); progress != "" {
+			stage = progress
+		}
+		return s.renderProcessingStatus(e, http.StatusOK, stage, project.Id, job.GetString("chapter_id"))
 	}
-	failed, err := s.failedJobs(project.Id)
-	if err != nil {
-		return e.InternalServerError("failed to inspect failed jobs", err)
+	if project.GetString("status") == db.ProjectStatusFailedJob {
+		failed, err := s.failedJobs(project.Id)
+		if err != nil {
+			return e.InternalServerError("failed to inspect failed jobs", err)
+		}
+		if len(failed) > 0 {
+			job := failed[0]
+			return s.renderStatus(e, http.StatusOK, job.GetString("job_type"), "failed", job.GetString("chapter_id"), job.GetString("error_msg"))
+		}
 	}
-	if len(failed) > 0 {
-		job := failed[0]
-		return s.renderStatus(e, http.StatusOK, job.GetString("job_type"), "failed", job.GetString("chapter_id"))
+	if chapters, err := s.chapterViews(project.Id); err == nil && len(chapters) > 0 {
+		if project.GetString("status") == db.ProjectStatusProcessing {
+			_ = s.updateProjectStatus(project.Id, db.ProjectStatusTOC)
+		}
+		e.Response.Header().Set("HX-Refresh", "true")
+		return s.renderStatus(e, 286, "complete", "completed", "", "")
+	}
+	if project.GetString("status") != db.ProjectStatusProcessing && project.GetString("status") != db.ProjectStatusFailedJob {
+		e.Response.Header().Set("HX-Refresh", "true")
+		return s.renderStatus(e, 286, "complete", "completed", "", "")
 	}
 	e.Response.Header().Set("HX-Refresh", "true")
-	return s.renderStatus(e, 286, "complete", "completed", "")
+	return s.renderStatus(e, 286, "complete", "completed", "", "")
+}
+
+func (s *Server) handleChapterStatus(e *core.RequestEvent) error {
+	project, chapter, err := s.projectChapterFromPath(e)
+	if err != nil {
+		return e.NotFoundError("chapter not found", err)
+	}
+	running, err := s.runningJobsForChapter(project.Id, chapter.Id)
+	if err != nil {
+		return e.InternalServerError("failed to inspect chapter job status", err)
+	}
+	if len(running) > 0 {
+		job := running[0]
+		return s.renderProcessingStatus(e, http.StatusOK, job.GetString("job_type"), project.Id, chapter.Id)
+	}
+	latest, err := s.latestJobForChapter(project.Id, chapter.Id)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return e.InternalServerError("failed to inspect latest chapter job", err)
+	}
+	if latest != nil && latest.GetString("status") == "failed" {
+		return s.renderStatus(e, http.StatusOK, latest.GetString("job_type"), "failed", chapter.Id, latest.GetString("error_msg"))
+	}
+	return s.renderChapterCockpit(e, http.StatusOK, project, chapter)
 }
 
 func (s *Server) handleIntakeNonfiction(e *core.RequestEvent) error {
-	html, err := views.RenderIntakeNonfiction(e.Request.URL.Query().Get("project_id"))
+	project, err := s.intakeProjectView(e.Request.URL.Query().Get("project_id"))
+	if err != nil {
+		return e.InternalServerError("failed to load intake values", err)
+	}
+	html, err := views.RenderIntakeNonfiction(project)
 	if err != nil {
 		return e.InternalServerError("failed to render intake fragment", err)
 	}
@@ -279,7 +364,11 @@ func (s *Server) handleIntakeNonfiction(e *core.RequestEvent) error {
 }
 
 func (s *Server) handleIntakeFiction(e *core.RequestEvent) error {
-	html, err := views.RenderIntakeFiction(e.Request.URL.Query().Get("project_id"))
+	project, err := s.intakeProjectView(e.Request.URL.Query().Get("project_id"))
+	if err != nil {
+		return e.InternalServerError("failed to load intake values", err)
+	}
+	html, err := views.RenderIntakeFiction(project)
 	if err != nil {
 		return e.InternalServerError("failed to render intake fragment", err)
 	}
@@ -317,6 +406,21 @@ func (s *Server) latestProject() (*core.Record, error) {
 
 func (s *Server) projectFromPath(e *core.RequestEvent) (*core.Record, error) {
 	return s.app.FindRecordById(db.CollectionProjects, e.Request.PathValue("id"))
+}
+
+func (s *Server) projectChapterFromPath(e *core.RequestEvent) (*core.Record, *core.Record, error) {
+	project, err := s.projectFromPath(e)
+	if err != nil {
+		return nil, nil, err
+	}
+	chapter, err := s.app.FindRecordById(db.CollectionChapters, e.Request.PathValue("chapterId"))
+	if err != nil {
+		return nil, nil, err
+	}
+	if chapter.GetString("project_id") != project.Id {
+		return nil, nil, sql.ErrNoRows
+	}
+	return project, chapter, nil
 }
 
 func (s *Server) firstChapter(projectID string) (*core.Record, error) {
@@ -361,7 +465,39 @@ func (s *Server) renderGrid(e *core.RequestEvent, status int, project *core.Reco
 	return e.HTML(status, html)
 }
 
+func (s *Server) renderWorkspace(e *core.RequestEvent, status int, project *core.Record, chapter *core.Record, workspaceTab string) error {
+	data, err := s.viewData(project, chapter)
+	if err != nil {
+		return e.InternalServerError("failed to prepare workspace data", err)
+	}
+	if workspaceTab != "" {
+		data.WorkspaceTab = workspaceTab
+	}
+	html, err := views.RenderWorkspace(data)
+	if err != nil {
+		return e.InternalServerError("failed to render workspace", err)
+	}
+	return e.HTML(status, html)
+}
+
+func (s *Server) renderChapterCockpit(e *core.RequestEvent, status int, project *core.Record, chapter *core.Record) error {
+	data, err := s.viewData(project, chapter)
+	if err != nil {
+		return e.InternalServerError("failed to prepare chapter data", err)
+	}
+	data.WorkspaceTab = "drafting"
+	html, err := views.RenderChapterCockpit(data)
+	if err != nil {
+		return e.InternalServerError("failed to render chapter cockpit", err)
+	}
+	return e.HTML(status, html)
+}
+
 func (s *Server) renderProcessing(e *core.RequestEvent, stage string, projectID string, chapterID string) error {
+	return s.renderProcessingStatus(e, http.StatusAccepted, stage, projectID, chapterID)
+}
+
+func (s *Server) renderProcessingStatus(e *core.RequestEvent, status int, stage string, projectID string, chapterID string) error {
 	html, err := views.RenderProcessing(views.ProcessingData{
 		Stage:     stage,
 		ProjectID: projectID,
@@ -370,14 +506,15 @@ func (s *Server) renderProcessing(e *core.RequestEvent, stage string, projectID 
 	if err != nil {
 		return e.InternalServerError("failed to render processing state", err)
 	}
-	return e.HTML(http.StatusAccepted, html)
+	return e.HTML(status, html)
 }
 
-func (s *Server) renderStatus(e *core.RequestEvent, statusCode int, jobType string, status string, chapterID string) error {
+func (s *Server) renderStatus(e *core.RequestEvent, statusCode int, jobType string, status string, chapterID string, errorMessage string) error {
 	html, err := views.RenderStatus(views.StatusData{
-		JobType:   jobType,
-		Status:    status,
-		ChapterID: chapterID,
+		JobType:      jobType,
+		Status:       status,
+		ChapterID:    chapterID,
+		ErrorMessage: errorMessage,
 	})
 	if err != nil {
 		return e.InternalServerError("failed to render status", err)
@@ -390,10 +527,22 @@ func (s *Server) viewData(project *core.Record, chapter *core.Record) (views.Pag
 	if err != nil {
 		return views.PageData{}, err
 	}
+	chapters, err := s.chapterViews(project.Id)
+	if err != nil {
+		return views.PageData{}, err
+	}
+	if len(chapters) > 0 && project.GetString("status") == db.ProjectStatusProcessing {
+		_ = s.updateProjectStatus(project.Id, db.ProjectStatusTOC)
+		project.Set("status", db.ProjectStatusTOC)
+	}
 	data := views.PageData{
 		Project:         projectView(project),
 		AllProjects:     projects,
 		ActiveProjectID: project.Id,
+	}
+	data.Project.Intake, err = s.intakeMap(project.Id)
+	if err != nil {
+		return views.PageData{}, err
 	}
 	data.IntakeSaved, err = s.hasIntake(project.Id)
 	if err != nil {
@@ -403,7 +552,77 @@ func (s *Server) viewData(project *core.Record, chapter *core.Record) (views.Pag
 		view := chapterView(chapter)
 		data.Chapter = &view
 	}
+	data.Chapters = chapters
+	if data.Chapter != nil {
+		data.PrevChapter, data.NextChapter = adjacentChapters(chapters, data.Chapter.ID)
+	}
+	if brief, err := s.briefInput(project.Id); err == nil && brief.Title != "" {
+		data.Brief = &views.Brief{
+			Title:         brief.Title,
+			Subtitle:      brief.Subtitle,
+			Promise:       brief.Promise,
+			VoiceTone:     brief.VoiceTone,
+			WhatItIs:      brief.WhatItIs,
+			WhatItIsNot:   brief.WhatItIsNot,
+			AISuggestions: brief.AISuggestions,
+		}
+	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return views.PageData{}, err
+	}
+	data.WorkspaceTab = workspaceTab(data)
 	return data, nil
+}
+
+func workspaceTab(data views.PageData) string {
+	if data.Chapter != nil && data.Project.Status == db.ProjectStatusDrafting {
+		return "drafting"
+	}
+	if len(data.Chapters) > 0 {
+		return "outline"
+	}
+	if data.Brief != nil {
+		return "brief"
+	}
+	return ""
+}
+
+func adjacentChapters(chapters []views.Chapter, chapterID string) (*views.Chapter, *views.Chapter) {
+	for index, chapter := range chapters {
+		if chapter.ID != chapterID {
+			continue
+		}
+		var prev *views.Chapter
+		var next *views.Chapter
+		if index > 0 {
+			value := chapters[index-1]
+			prev = &value
+		}
+		if index+1 < len(chapters) {
+			value := chapters[index+1]
+			next = &value
+		}
+		return prev, next
+	}
+	return nil, nil
+}
+
+func (s *Server) chapterViews(projectID string) ([]views.Chapter, error) {
+	records, err := s.app.FindRecordsByFilter(
+		db.CollectionChapters,
+		"project_id = {:project_id}",
+		"sort_order",
+		0,
+		0,
+		dbx.Params{"project_id": projectID},
+	)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]views.Chapter, 0, len(records))
+	for _, record := range records {
+		result = append(result, chapterView(record))
+	}
+	return result, nil
 }
 
 func (s *Server) hasIntake(projectID string) (bool, error) {
@@ -444,6 +663,22 @@ func projectView(record *core.Record) views.Project {
 	}
 }
 
+func (s *Server) intakeProjectView(projectID string) (views.Project, error) {
+	if projectID == "" {
+		return views.Project{Intake: map[string]string{}}, nil
+	}
+	project, err := s.app.FindRecordById(db.CollectionProjects, projectID)
+	if err != nil {
+		return views.Project{}, err
+	}
+	view := projectView(project)
+	view.Intake, err = s.intakeMap(projectID)
+	if err != nil {
+		return views.Project{}, err
+	}
+	return view, nil
+}
+
 func chapterView(record *core.Record) views.Chapter {
 	return views.Chapter{
 		ID:                   record.Id,
@@ -482,6 +717,9 @@ func (s *Server) upsertIntakeResponse(projectID, key, value string) error {
 }
 
 func (s *Server) createJob(projectID, chapterID, jobType string) (*core.Record, error) {
+	if err := s.supersedeRunningJobs(projectID, chapterID, jobType); err != nil {
+		return nil, err
+	}
 	collection, err := s.app.FindCollectionByNameOrId(db.CollectionJobs)
 	if err != nil {
 		return nil, err
@@ -501,10 +739,10 @@ func (s *Server) createJob(projectID, chapterID, jobType string) (*core.Record, 
 }
 
 func (s *Server) runJob(projectID, chapterID, jobID, jobType string) {
-	ctx, cancel := context.WithTimeout(context.Background(), jobTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeoutForJob(jobType))
 	defer cancel()
 
-	err := s.executeJob(ctx, projectID, chapterID, jobType)
+	err := s.executeJob(ctx, projectID, chapterID, jobID, jobType)
 	job, findErr := s.app.FindRecordById(db.CollectionJobs, jobID)
 	if findErr != nil {
 		return
@@ -516,11 +754,12 @@ func (s *Server) runJob(projectID, chapterID, jobID, jobType string) {
 		_ = s.markProjectFailed(projectID)
 	} else {
 		job.Set("status", "completed")
+		job.Set("error_msg", "")
 	}
 	_ = s.app.Save(job)
 }
 
-func (s *Server) executeJob(ctx context.Context, projectID, chapterID, jobType string) error {
+func (s *Server) executeJob(ctx context.Context, projectID, chapterID, jobID, jobType string) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -529,16 +768,21 @@ func (s *Server) executeJob(ctx context.Context, projectID, chapterID, jobType s
 
 	switch jobType {
 	case "brief":
-		_, err := s.ensureBrief(ctx, projectID)
-		return err
-	case "toc":
 		if err := s.updateProjectStatus(projectID, db.ProjectStatusProcessing); err != nil {
 			return err
 		}
 		if _, err := s.ensureBrief(ctx, projectID); err != nil {
 			return err
 		}
-		if err := s.updateProjectStatus(projectID, db.ProjectStatusBrief); err != nil {
+		return s.updateProjectStatus(projectID, db.ProjectStatusBrief)
+	case "toc":
+		if err := s.updateProjectStatus(projectID, db.ProjectStatusProcessing); err != nil {
+			return err
+		}
+		if _, err := s.briefInput(projectID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return errors.New("book brief must be generated before outline and chapter shells")
+			}
 			return err
 		}
 		if err := s.ensureTOC(ctx, projectID); err != nil {
@@ -546,18 +790,20 @@ func (s *Server) executeJob(ctx context.Context, projectID, chapterID, jobType s
 		}
 		return s.updateProjectStatus(projectID, db.ProjectStatusTOC)
 	case "autopilot":
-		return s.executeAutopilot(ctx, projectID)
+		return s.executeAutopilot(ctx, projectID, jobID)
 	}
 	return s.executePipelineStage(ctx, projectID, chapterID, jobType)
 }
 
-func (s *Server) executeAutopilot(ctx context.Context, projectID string) error {
+func (s *Server) executeAutopilot(ctx context.Context, projectID string, jobID string) error {
+	_ = s.updateJobProgress(jobID, "Auto: preparing Book Brief")
 	if err := s.updateProjectStatus(projectID, db.ProjectStatusProcessing); err != nil {
 		return err
 	}
 	if _, err := s.ensureBrief(ctx, projectID); err != nil {
 		return err
 	}
+	_ = s.updateJobProgress(jobID, "Auto: preparing outline")
 	if err := s.updateProjectStatus(projectID, db.ProjectStatusBrief); err != nil {
 		return err
 	}
@@ -584,18 +830,21 @@ func (s *Server) executeAutopilot(ctx context.Context, projectID string) error {
 	if err := s.updateProjectStatus(projectID, db.ProjectStatusDrafting); err != nil {
 		return err
 	}
-	for _, chapter := range chapters {
+	for chapterIndex, chapter := range chapters {
+		chapterLabel := fmt.Sprintf("chapter %d/%d: %s", chapterIndex+1, len(chapters), chapter.GetString("title"))
 		for _, stage := range []string{"draft", "diagnose", "rewrite", "polish"} {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
 			default:
 			}
+			_ = s.updateJobProgress(jobID, fmt.Sprintf("Auto: %s - %s", chapterLabel, stageLabelForProgress(stage)))
 			if err := s.executePipelineStage(ctx, projectID, chapter.Id, stage); err != nil {
 				return err
 			}
 		}
 	}
+	_ = s.updateJobProgress(jobID, "Auto: complete")
 	return nil
 }
 
@@ -735,8 +984,11 @@ func (s *Server) ensureTOC(ctx context.Context, projectID string) error {
 	if err != nil {
 		return err
 	}
-	brief, err := s.ensureBrief(ctx, projectID)
+	brief, err := s.briefInput(projectID)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return errors.New("book brief must be generated before outline and chapter shells")
+		}
 		return err
 	}
 	output, err := s.llm.Generate(ctx, prompts.SystemPrompt(), prompts.BuildTOCPrompt(project, brief))
@@ -878,8 +1130,40 @@ func (s *Server) markProjectFailed(projectID string) error {
 	return s.app.Save(project)
 }
 
+func (s *Server) updateJobProgress(jobID string, progress string) error {
+	job, err := s.app.FindRecordById(db.CollectionJobs, jobID)
+	if err != nil {
+		return err
+	}
+	job.Set("error_msg", strings.TrimSpace(progress))
+	return s.app.Save(job)
+}
+
+func (s *Server) supersedeRunningJobs(projectID, chapterID, jobType string) error {
+	filter := "project_id = {:project_id} && job_type = {:job_type} && status = 'running'"
+	params := dbx.Params{"project_id": projectID, "job_type": jobType}
+	if chapterID != "" {
+		filter += " && chapter_id = {:chapter_id}"
+		params["chapter_id"] = chapterID
+	}
+	records, err := s.app.FindRecordsByFilter(db.CollectionJobs, filter, "created", 0, 0, params)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, record := range records {
+		record.Set("status", "failed")
+		record.Set("error_msg", "superseded by a newer job")
+		record.Set("completed_at", now)
+		if err := s.app.Save(record); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Server) runningJobs(projectID string) ([]*core.Record, error) {
-	return s.app.FindRecordsByFilter(
+	records, err := s.app.FindRecordsByFilter(
 		db.CollectionJobs,
 		"project_id = {:project_id} && status = 'running'",
 		"created",
@@ -887,6 +1171,53 @@ func (s *Server) runningJobs(projectID string) ([]*core.Record, error) {
 		0,
 		dbx.Params{"project_id": projectID},
 	)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	active := make([]*core.Record, 0, len(records))
+	for _, record := range records {
+		if jobTimedOut(record, now) {
+			record.Set("status", "failed")
+			record.Set("error_msg", "job timed out before reporting completion")
+			record.Set("completed_at", now.Format(time.RFC3339))
+			if err := s.app.Save(record); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		active = append(active, record)
+	}
+	return active, nil
+}
+
+func (s *Server) runningJobsForChapter(projectID, chapterID string) ([]*core.Record, error) {
+	records, err := s.app.FindRecordsByFilter(
+		db.CollectionJobs,
+		"project_id = {:project_id} && chapter_id = {:chapter_id} && status = 'running'",
+		"created",
+		0,
+		0,
+		dbx.Params{"project_id": projectID, "chapter_id": chapterID},
+	)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	active := make([]*core.Record, 0, len(records))
+	for _, record := range records {
+		if jobTimedOut(record, now) {
+			record.Set("status", "failed")
+			record.Set("error_msg", "job timed out before reporting completion")
+			record.Set("completed_at", now.Format(time.RFC3339))
+			if err := s.app.Save(record); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		active = append(active, record)
+	}
+	return active, nil
 }
 
 func (s *Server) failedJobs(projectID string) ([]*core.Record, error) {
@@ -898,6 +1229,82 @@ func (s *Server) failedJobs(projectID string) ([]*core.Record, error) {
 		0,
 		dbx.Params{"project_id": projectID},
 	)
+}
+
+func (s *Server) failedJobsForChapter(projectID, chapterID string) ([]*core.Record, error) {
+	return s.app.FindRecordsByFilter(
+		db.CollectionJobs,
+		"project_id = {:project_id} && chapter_id = {:chapter_id} && status = 'failed'",
+		"-updated",
+		1,
+		0,
+		dbx.Params{"project_id": projectID, "chapter_id": chapterID},
+	)
+}
+
+func (s *Server) latestJobForChapter(projectID, chapterID string) (*core.Record, error) {
+	records, err := s.app.FindRecordsByFilter(
+		db.CollectionJobs,
+		"project_id = {:project_id} && chapter_id = {:chapter_id}",
+		"-created",
+		1,
+		0,
+		dbx.Params{"project_id": projectID, "chapter_id": chapterID},
+	)
+	if err != nil {
+		return nil, err
+	}
+	if len(records) == 0 {
+		return nil, sql.ErrNoRows
+	}
+	return records[0], nil
+}
+
+func jobTimedOut(record *core.Record, now time.Time) bool {
+	startedAt := strings.TrimSpace(record.GetString("started_at"))
+	if startedAt == "" {
+		return false
+	}
+	started, err := time.Parse(time.RFC3339, startedAt)
+	if err != nil {
+		return false
+	}
+	return now.Sub(started) > timeoutForJob(record.GetString("job_type"))
+}
+
+func runningJobMessage(record *core.Record) string {
+	startedAt := strings.TrimSpace(record.GetString("started_at"))
+	if startedAt == "" {
+		return "waiting for job completion"
+	}
+	started, err := time.Parse(time.RFC3339, startedAt)
+	if err != nil {
+		return "waiting for job completion"
+	}
+	age := time.Since(started).Round(time.Second)
+	return fmt.Sprintf("running for %s", age)
+}
+
+func stageLabelForProgress(stage string) string {
+	switch stage {
+	case "draft":
+		return "drafting"
+	case "diagnose":
+		return "editor feedback"
+	case "rewrite":
+		return "rewriting"
+	case "polish":
+		return "finishing"
+	default:
+		return stage
+	}
+}
+
+func timeoutForJob(jobType string) time.Duration {
+	if jobType == "autopilot" {
+		return autopilotJobTimeout
+	}
+	return jobTimeout
 }
 
 func validPipelineStage(stage string) bool {

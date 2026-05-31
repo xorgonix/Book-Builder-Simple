@@ -98,6 +98,8 @@ For AI pipeline work:
 
 - The user can see important intermediate outputs.
 - The user can choose whether to act on reviewer/editor feedback.
+- The user can accept, edit, reject, or regenerate important generated artifacts before the next stage uses them.
+- The app does not silently treat generated text as user-approved structure.
 - Autopilot behavior is clearly optional.
 - Stage outputs are not overwritten without a recovery or versioning plan.
 
@@ -149,4 +151,3 @@ Acceptance checks: Create a chapter, run two reviewer types, confirm both review
 Viewer-safe explanation: This adds transparency so AI critique is inspectable instead of silently folded into rewrites.
 Known risks: Requires later versioning cleanup before public multi-user launch.
 ```
-

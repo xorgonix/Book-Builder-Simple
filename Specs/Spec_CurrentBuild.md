@@ -4,7 +4,7 @@ This document records what the runnable application currently does. It is the im
 
 ## 1. Current Status
 
-The app is a first runnable vertical slice of the Book Prototype Architect. It supports creating projects, collecting intake, generating a blueprint/table of contents, and running a chapter drafting pipeline through draft, diagnosis, rewrite, and polish passes.
+The app is a first runnable vertical slice of the Book Prototype Architect. It supports creating projects, collecting intake, generating a Book Brief, generating outline/table-of-contents chapter shells from that approved brief, and running a chapter drafting pipeline through draft, diagnosis, rewrite, and polish passes.
 
 Current classification: **local-first prototype with partial production architecture**.
 
@@ -35,7 +35,10 @@ Current classification: **local-first prototype with partial production architec
 - Fiction/nonfiction intake toggle.
 - Intake persistence to `intake_responses`.
 - Basic book-jacket style workspace placeholder.
-- Blueprint generation.
+- Book Brief generation as its own visible stage.
+- Outline/table-of-contents chapter shell generation after the Book Brief exists.
+- Outline/table-of-contents results render as a reviewable chapter-shell list with the Book Brief still accessible in the workspace.
+- The center workspace uses tabs for available project artifacts: Book Brief, Outline, and Drafting.
 - Chapter cockpit with visible tabs for:
   - raw draft
   - editorial diagnosis
@@ -54,6 +57,8 @@ Current classification: **local-first prototype with partial production architec
 - Job records are created in the `jobs` collection.
 - The visible processing component polls while a job is active.
 - Idle right-panel polling was removed to avoid screen flicker and terminal noise.
+- Status polling now treats stale `running` jobs as failed and refreshes completed project stages instead of letting stale job rows mask saved outputs.
+- TOC parsing tolerates common LLM formatting drift where the chapter title appears after or below the `Order:` value.
 
 ## 3. Partially Implemented
 
@@ -69,7 +74,12 @@ Current classification: **local-first prototype with partial production architec
 
 ### Human-In-The-Loop Editing
 
+- The Book Brief now appears as a reviewable workspace stage before chapter shells are generated.
+- The Outline & Chapter Shells action requires an existing Book Brief.
+- The generated chapter shells now appear as an outline review screen instead of immediately replacing the workspace with a single chapter cockpit.
 - Users can inspect stage outputs and provide rewrite notes from the diagnosis tab.
+- Full accept/edit/reject/regenerate controls do not yet exist at every stage.
+- The app does not yet distinguish AI-generated artifacts from user-approved artifacts.
 - Users cannot yet maintain a durable editorial decision log.
 - Users cannot yet choose among multiple reviewer types.
 - Users cannot yet ask the same reviewer to re-review the same manuscript version as a stored separate pass.
@@ -145,9 +155,11 @@ Recommended test path:
 2. Choose fiction or nonfiction.
 3. Fill the intake fields.
 4. Save intake.
-5. Generate blueprint.
-6. Use the chapter cockpit to run one chapter manually through draft, diagnose, revise, and polish.
-7. Use autopilot only when intentionally skipping intermediate review.
+5. Generate the Book Brief.
+6. Review the Book Brief.
+7. Generate the outline and chapter shells.
+8. Use the chapter cockpit to run one chapter manually through draft, diagnose, revise, and polish.
+9. Use autopilot only when intentionally skipping intermediate review.
 
 ## 6. Spec Drift Rule
 
@@ -160,4 +172,3 @@ Use these labels in future spec work:
 - `Deferred`
 - `Not yet designed`
 - `Rejected`
-

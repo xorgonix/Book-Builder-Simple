@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"html/template"
 	"strconv"
+	"strings"
 )
 
 type Project struct {
@@ -14,6 +15,7 @@ type Project struct {
 	Status         string
 	TargetLength   string
 	TargetChapters int
+	Intake         map[string]string
 }
 
 type Chapter struct {
@@ -29,11 +31,26 @@ type Chapter struct {
 	PreviousDraftContent string
 }
 
+type Brief struct {
+	Title         string
+	Subtitle      string
+	Promise       string
+	VoiceTone     string
+	WhatItIs      string
+	WhatItIsNot   string
+	AISuggestions string
+}
+
 type PageData struct {
 	Project         Project
+	Brief           *Brief
 	Chapter         *Chapter
+	PrevChapter     *Chapter
+	NextChapter     *Chapter
+	Chapters        []Chapter
 	AllProjects     []Project
 	ActiveProjectID string
+	WorkspaceTab    string
 	IntakeSaved     bool
 }
 
@@ -50,15 +67,20 @@ type ProcessingData struct {
 }
 
 type StatusData struct {
-	JobType   string
-	Status    string
-	ChapterID string
+	JobType      string
+	Status       string
+	ChapterID    string
+	ErrorMessage string
 }
 
 var templates = template.Must(template.New("views").Funcs(template.FuncMap{
 	"eq":            func(a, b string) bool { return a == b },
 	"chapterSuffix": chapterSuffix,
+	"stageLabel":    stageLabel,
+	"jobLabel":      jobLabel,
+	"statusLabel":   statusLabel,
 	"statusClass":   statusClass,
+	"stepDone":      stepDone,
 	"js":            jsString,
 	"selector":      fieldSelector,
 }).Parse(templateSource))
@@ -71,12 +93,20 @@ func RenderGrid(data PageData) (string, error) {
 	return render("grid", data)
 }
 
-func RenderIntakeNonfiction(projectID string) (string, error) {
-	return render("intake_nonfiction", Project{ID: projectID})
+func RenderWorkspace(data PageData) (string, error) {
+	return render("workspace_panel", data)
 }
 
-func RenderIntakeFiction(projectID string) (string, error) {
-	return render("intake_fiction", Project{ID: projectID})
+func RenderChapterCockpit(data PageData) (string, error) {
+	return render("chapter_cockpit", data)
+}
+
+func RenderIntakeNonfiction(project Project) (string, error) {
+	return render("intake_nonfiction", project)
+}
+
+func RenderIntakeFiction(project Project) (string, error) {
+	return render("intake_fiction", project)
 }
 
 func RenderEscapeHatch(data EscapeHatchData) (string, error) {
@@ -114,6 +144,59 @@ func statusClass(status string) string {
 		return "alert-success"
 	default:
 		return "alert-info"
+	}
+}
+
+func stageLabel(stage string) string {
+	switch strings.TrimSpace(strings.ToLower(stage)) {
+	case "book brief", "brief":
+		return "brief"
+	case "outline and chapter shells", "outline", "toc":
+		return "outline"
+	case "draft", "drafting":
+		return "draft"
+	case "diagnose", "feedback":
+		return "feedback"
+	case "rewrite":
+		return "rewrite"
+	case "polish", "finish":
+		return "finish"
+	case "autopilot", "auto":
+		return "auto"
+	default:
+		return strings.TrimSpace(stage)
+	}
+}
+
+func jobLabel(jobType string) string {
+	return stageLabel(jobType)
+}
+
+func statusLabel(status string) string {
+	switch strings.TrimSpace(strings.ToLower(status)) {
+	case "running":
+		return "working"
+	case "completed":
+		return "done"
+	case "failed":
+		return "stopped"
+	default:
+		return strings.TrimSpace(status)
+	}
+}
+
+func stepDone(status string, step string) bool {
+	switch step {
+	case "intent":
+		return status != ""
+	case "brief":
+		return status == "brief" || status == "toc" || status == "drafting"
+	case "toc":
+		return status == "toc" || status == "drafting"
+	case "drafting":
+		return status == "drafting"
+	default:
+		return false
 	}
 }
 
@@ -169,17 +252,22 @@ const templateSource = `
     </aside>
 
     <main class="col-span-12 lg:col-span-6 bg-base-200 p-6 overflow-y-auto h-full flex flex-col" id="workspace-panel">
-        {{ if .Chapter }}
-            {{ template "chapter_cockpit" . }}
-        {{ else }}
-            {{ template "empty_workspace" . }}
-        {{ end }}
+        {{ template "workspace_panel" . }}
     </main>
 
     <aside class="col-span-12 lg:col-span-3 border-l border-base-300 bg-base-100 p-4 overflow-y-auto flex flex-col gap-4 h-full">
+        {{ template "project_list" . }}
         {{ template "autopilot" . }}
     </aside>
 </div>
+{{- end }}
+
+{{ define "workspace_panel" -}}
+{{ if or .Brief .Chapters }}
+    {{ template "workspace_tabs" . }}
+{{ else }}
+    {{ template "empty_workspace" . }}
+{{ end }}
 {{- end }}
 
 {{ define "intake_form" -}}
@@ -187,34 +275,57 @@ const templateSource = `
     <ul class="steps steps-horizontal w-full text-xs font-bold mb-2">
         <li class="step step-primary">Type</li>
         <li class="step {{ if .IntakeSaved }}step-primary{{ end }}">Intent</li>
-        <li class="step">Blueprint</li>
-        <li class="step">Drafting</li>
+        <li class="step {{ if stepDone .Project.Status "brief" }}step-primary{{ end }}">Brief</li>
+        <li class="step {{ if stepDone .Project.Status "toc" }}step-primary{{ end }}">Outline</li>
+        <li class="step {{ if stepDone .Project.Status "drafting" }}step-primary{{ end }}">Drafting</li>
     </ul>
+
+    <div class="alert alert-info py-2 px-3 text-xs leading-relaxed">
+        <span><span class="font-bold">Need a starting point?</span> The fields below shape the Book Brief. Pick the book type first, then the form, reader, point of view, and structure.</span>
+    </div>
 
     <div class="bg-base-200 p-3 rounded-lg border border-base-300 flex flex-col gap-3">
         <span class="text-xs font-bold uppercase tracking-wider text-base-content/60">Manuscript Target Scale</span>
         <div class="form-control">
-            <label class="label-text mb-1 font-semibold">Target Length</label>
+            <div class="flex items-center gap-2 mb-1">
+                <label class="label-text font-semibold">Book Length</label>
+                <div class="tooltip tooltip-right" data-tip="Controls the approximate book size and how much material the outline and chapter shells should generate.">
+                    <span class="badge badge-ghost badge-sm">?</span>
+                </div>
+            </div>
             <select name="target_length" class="select select-bordered select-sm w-full bg-base-100">
                 <option value="short_guide" {{ if eq .Project.TargetLength "short_guide" }}selected{{ end }}>Short Guide (~5k words / 5 Chapters)</option>
                 <option value="practical_ebook" {{ if eq .Project.TargetLength "practical_ebook" }}selected{{ end }}>Practical eBook (~15k words / 10 Chapters)</option>
                 <option value="full_prototype" {{ if eq .Project.TargetLength "full_prototype" }}selected{{ end }}>Full-Length Prototype (~40k words / 15 Chapters)</option>
             </select>
+            <p class="mt-1 text-[11px] text-base-content/60">Pick the size you want the app to aim for. Bigger settings create more chapter shells.</p>
         </div>
         <div class="form-control">
-            <label class="label-text mb-1 font-semibold">Chapter Counter Target</label>
+            <div class="flex items-center gap-2 mb-1">
+                <label class="label-text font-semibold">How Many Chapters?</label>
+                <div class="tooltip tooltip-right" data-tip="Sets how many chapter shells the outline should produce.">
+                    <span class="badge badge-ghost badge-sm">?</span>
+                </div>
+            </div>
             <input type="number" name="target_chapters" value="{{ .Project.TargetChapters }}" min="1" max="25" class="input input-bordered input-sm bg-base-100" />
+            <p class="mt-1 text-[11px] text-base-content/60">Use this if you want to change the default chapter count.</p>
         </div>
     </div>
 
     <div class="form-control w-full">
-        <label class="label-text font-bold mb-1">Project Classification Vector</label>
+        <div class="flex items-center gap-2 mb-1">
+            <label class="label-text font-bold">What Kind of Book?</label>
+            <div class="tooltip tooltip-right" data-tip="First pick fiction or nonfiction. Then the form below helps narrow it down.">
+                <span class="badge badge-ghost badge-sm">?</span>
+            </div>
+        </div>
         <div class="join w-full shadow-sm">
             <input class="join-item btn btn-sm flex-1" type="radio" name="book_type" value="nonfiction" aria-label="Non-Fiction"
                    hx-get="/app/ui/fragments/intake-nonfiction?project_id={{ .Project.ID }}" hx-target="#dynamic-questions-wrapper" {{ if eq .Project.BookType "nonfiction" }}checked{{ end }} />
             <input class="join-item btn btn-sm flex-1" type="radio" name="book_type" value="fiction" aria-label="Fiction"
                    hx-get="/app/ui/fragments/intake-fiction?project_id={{ .Project.ID }}" hx-target="#dynamic-questions-wrapper" {{ if eq .Project.BookType "fiction" }}checked{{ end }} />
         </div>
+        <p class="mt-1 text-[11px] text-base-content/60">This is only the first split. The next fields let you choose the specific form, point of view, and story pattern.</p>
     </div>
 
     <div id="dynamic-questions-wrapper" class="transition-all duration-300 flex flex-col gap-3">
@@ -225,38 +336,256 @@ const templateSource = `
         {{ end }}
     </div>
 
-    <button class="btn btn-sm btn-primary font-bold">Save Intake</button>
+    <div class="alert alert-success py-2 px-3 text-xs leading-relaxed">
+        <span><span class="font-bold">Save Answers</span> writes these settings into the project. After that, use the right-side buttons to generate the Book Brief.</span>
+    </div>
+
+    <button class="btn btn-sm btn-primary font-bold" title="Save the intake values so the Book Brief can be generated from them.">Save Answers</button>
 </form>
 {{- end }}
 
 {{ define "intake_nonfiction" -}}
-<textarea class="textarea textarea-bordered text-sm bg-base-100" name="core_topic" placeholder="What is the book explicitly about?"></textarea>
-<textarea class="textarea textarea-bordered text-sm bg-base-100" name="target_audience" placeholder="Who is this book written for?"></textarea>
+<div class="form-control gap-1">
+    <div class="flex items-center gap-2">
+        <label class="label-text font-semibold">Nonfiction Style</label>
+        <div class="tooltip tooltip-right" data-tip="Pick the nonfiction lane that feels closest. This helps the app speak in the right book style.">
+            <span class="badge badge-ghost badge-sm">?</span>
+        </div>
+    </div>
+    <select name="book_form" class="select select-bordered select-sm w-full bg-base-100">
+        <option value="" {{ if eq (index .Intake "book_form") "" }}selected{{ end }}>Choose a style</option>
+        <option value="how_to" {{ if eq (index .Intake "book_form") "how_to" }}selected{{ end }}>How-To / Step-by-Step Guide</option>
+        <option value="self_help" {{ if eq (index .Intake "book_form") "self_help" }}selected{{ end }}>Self-Help / Personal Growth</option>
+        <option value="business" {{ if eq (index .Intake "book_form") "business" }}selected{{ end }}>Business / Strategy Playbook</option>
+        <option value="memoir" {{ if eq (index .Intake "book_form") "memoir" }}selected{{ end }}>Memoir / Personal Story</option>
+        <option value="history" {{ if eq (index .Intake "book_form") "history" }}selected{{ end }}>History / Explanation</option>
+        <option value="biography" {{ if eq (index .Intake "book_form") "biography" }}selected{{ end }}>Biography / Profile</option>
+        <option value="argument" {{ if eq (index .Intake "book_form") "argument" }}selected{{ end }}>Argument / Research / Essay</option>
+        <option value="workbook" {{ if eq (index .Intake "book_form") "workbook" }}selected{{ end }}>Workbook / Exercises / Templates</option>
+        <option value="thought_leadership" {{ if eq (index .Intake "book_form") "thought_leadership" }}selected{{ end }}>Thought Leadership / Framework</option>
+    </select>
+    <p class="text-[11px] text-base-content/60">Examples: a how-to book, memoir, business book, workbook, or thought-leadership title.</p>
+</div>
+<div class="form-control gap-1">
+    <div class="flex items-center gap-2">
+        <label class="label-text font-semibold">What Is It About?</label>
+        <div class="tooltip tooltip-right" data-tip="Write the main idea in one plain sentence. This becomes part of the Book Brief and outline focus.">
+            <span class="badge badge-ghost badge-sm">?</span>
+        </div>
+    </div>
+    <textarea class="textarea textarea-bordered text-sm bg-base-100" name="core_topic" placeholder="In one sentence, what is this book about?"></textarea>
+    <p class="text-[11px] text-base-content/60">Example: the book teaches, explains, or helps the reader do something specific.</p>
+</div>
+<div class="form-control gap-1">
+    <div class="flex items-center gap-2">
+        <label class="label-text font-semibold">Who Is It For?</label>
+        <div class="tooltip tooltip-right" data-tip="Name the reader this book is meant to help. A specific person is better than a broad audience.">
+            <span class="badge badge-ghost badge-sm">?</span>
+        </div>
+    </div>
+    <textarea id="target_audience" class="textarea textarea-bordered text-sm bg-base-100" name="target_audience" placeholder="For example: first-time managers, exhausted parents, or romance readers"></textarea>
+    <div class="mt-1 flex flex-wrap gap-2">
+        <button type="button" class="btn btn-xs btn-outline btn-secondary font-bold" title="Suggest a specific reader profile based on the premise." hx-post="/api/project/{{ .ID }}/escape-hatch?field=target_audience" hx-target="#target_audience" hx-swap="outerHTML">Suggest Reader</button>
+    </div>
+    <p class="text-[11px] text-base-content/60">This helps the app aim the tone, examples, and chapter order. If you are stuck, let the app suggest a reader profile.</p>
+</div>
 <div class="form-control">
     <div class="flex justify-between items-center mb-1 gap-2">
-        <label class="label-text font-semibold">Core Audience Hunger & Desires</label>
-        <button type="button" class="btn btn-xs btn-outline btn-secondary font-bold" hx-post="/api/project/{{ .ID }}/escape-hatch?field=reader_hunger" hx-target="#hunger-textarea" hx-swap="outerHTML">Inspire Me</button>
+        <div class="flex items-center gap-2">
+            <label class="label-text font-semibold">Why Do They Need It?</label>
+            <div class="tooltip tooltip-right" data-tip="What problem, question, or wish makes this reader pick up the book?">
+                <span class="badge badge-ghost badge-sm">?</span>
+            </div>
+        </div>
+        <button type="button" class="btn btn-xs btn-outline btn-secondary font-bold" title="Generate premise-aware wording to help fill this field." hx-post="/api/project/{{ .ID }}/escape-hatch?field=reader_hunger" hx-target="#reader_hunger" hx-swap="outerHTML">Show a Hint</button>
     </div>
-    <textarea id="hunger-textarea" name="reader_hunger" class="textarea textarea-bordered h-24 text-sm bg-base-100" placeholder="What deep pain, question, or frustration brings this exact reader to your book?"></textarea>
+    <textarea id="reader_hunger" name="reader_hunger" class="textarea textarea-bordered h-24 text-sm bg-base-100" placeholder="What keeps this reader up at night, or what do they want solved?"></textarea>
+    <p class="text-[11px] text-base-content/60">Make this premise-based. The hint should be concrete, not generic motivation.</p>
 </div>
-<textarea class="textarea textarea-bordered text-sm bg-base-100" name="prohibited_directions" placeholder="What should this book absolutely not become?"></textarea>
-<textarea class="textarea textarea-bordered text-sm bg-base-100" name="author_intent" placeholder="What should the reader be able to do, understand, or feel after reading?"></textarea>
-<input class="input input-bordered input-sm bg-base-100" name="selected_tone" placeholder="Tone, e.g. Warm, Direct, Credible" />
+<div class="form-control gap-1">
+    <div class="flex items-center gap-2">
+        <label class="label-text font-semibold">Story Shape</label>
+        <div class="tooltip tooltip-right" data-tip="Choose the story or book shape you want to follow, so the outline has a clear engine.">
+            <span class="badge badge-ghost badge-sm">?</span>
+        </div>
+    </div>
+    <select name="structure_model" class="select select-bordered select-sm w-full bg-base-100">
+        <option value="" {{ if eq (index .Intake "structure_model") "" }}selected{{ end }}>Choose a shape</option>
+        <option value="how_to_ladder" {{ if eq (index .Intake "structure_model") "how_to_ladder" }}selected{{ end }}>How-To Ladder</option>
+        <option value="framework" {{ if eq (index .Intake "structure_model") "framework" }}selected{{ end }}>Framework / 3-Part Framework</option>
+        <option value="case_study" {{ if eq (index .Intake "structure_model") "case_study" }}selected{{ end }}>Case Study / Example Driven</option>
+        <option value="argument" {{ if eq (index .Intake "structure_model") "argument" }}selected{{ end }}>Argument / Thesis / Proof</option>
+        <option value="memoir_arc" {{ if eq (index .Intake "structure_model") "memoir_arc" }}selected{{ end }}>Memoir Arc</option>
+        <option value="workbook" {{ if eq (index .Intake "structure_model") "workbook" }}selected{{ end }}>Workbook / Exercises</option>
+        <option value="hero_journey" {{ if eq (index .Intake "structure_model") "hero_journey" }}selected{{ end }}>Hero's Journey</option>
+        <option value="romance_beats" {{ if eq (index .Intake "structure_model") "romance_beats" }}selected{{ end }}>Romance Beat Sheet</option>
+        <option value="mystery_trail" {{ if eq (index .Intake "structure_model") "mystery_trail" }}selected{{ end }}>Mystery / Clue Trail</option>
+        <option value="three_act" {{ if eq (index .Intake "structure_model") "three_act" }}selected{{ end }}>Three-Act Structure</option>
+    </select>
+    <p class="text-[11px] text-base-content/60">Examples: Hero's Journey, Three-Act, romance beats, a mystery clue trail, or a nonfiction framework.</p>
+</div>
+<div class="form-control gap-1">
+    <div class="flex items-center gap-2">
+        <label class="label-text font-semibold">What To Avoid</label>
+        <div class="tooltip tooltip-right" data-tip="Tells the app what to avoid so the brief does not drift into unwanted territory.">
+            <span class="badge badge-ghost badge-sm">?</span>
+        </div>
+    </div>
+    <textarea id="prohibited_directions" class="textarea textarea-bordered text-sm bg-base-100" name="prohibited_directions" placeholder="What should this book absolutely not become?"></textarea>
+    <div class="mt-1 flex flex-wrap gap-2">
+        <button type="button" class="btn btn-xs btn-outline btn-secondary font-bold" title="Suggest specific things this book should avoid." hx-post="/api/project/{{ .ID }}/escape-hatch?field=prohibited_directions" hx-target="#prohibited_directions" hx-swap="outerHTML">Show Avoid Examples</button>
+    </div>
+    <p class="text-[11px] text-base-content/60">Think of this as a guardrail list: wrong tropes, wrong tone, wrong pace, or the wrong amount of detail.</p>
+</div>
+<div class="form-control gap-1">
+    <div class="flex items-center gap-2">
+        <label class="label-text font-semibold">Ending Effect</label>
+        <div class="tooltip tooltip-right" data-tip="What the reader should know, do, or feel after reading.">
+            <span class="badge badge-ghost badge-sm">?</span>
+        </div>
+    </div>
+    <textarea class="textarea textarea-bordered text-sm bg-base-100" name="author_intent" placeholder="What should the reader be able to do, understand, or feel after reading?"></textarea>
+    <p class="text-[11px] text-base-content/60">This is the ending effect. Use it to tell the app what the book should leave behind.</p>
+</div>
+<div class="form-control gap-1">
+    <div class="flex items-center gap-2">
+        <label class="label-text font-semibold">Selected Tone</label>
+        <div class="tooltip tooltip-right" data-tip="A short style direction for the writing voice.">
+            <span class="badge badge-ghost badge-sm">?</span>
+        </div>
+    </div>
+    <input class="input input-bordered input-sm bg-base-100" name="selected_tone" placeholder="Tone, e.g. Warm, Direct, Credible" />
+    <p class="text-[11px] text-base-content/60">Example tones: warm, practical, authoritative, compassionate, brisk, analytical.</p>
+</div>
 {{- end }}
 
 {{ define "intake_fiction" -}}
-<textarea class="textarea textarea-bordered text-sm bg-base-100" name="core_topic" placeholder="What is the story premise?"></textarea>
-<textarea class="textarea textarea-bordered text-sm bg-base-100" name="target_audience" placeholder="Who is the ideal reader?"></textarea>
+<div class="form-control gap-1">
+    <div class="flex items-center gap-2">
+        <label class="label-text font-semibold">Fiction Type</label>
+        <div class="tooltip tooltip-right" data-tip="Pick the fiction lane that fits best. This helps the brief use the right story language and expectations.">
+            <span class="badge badge-ghost badge-sm">?</span>
+        </div>
+    </div>
+    <select name="book_form" class="select select-bordered select-sm w-full bg-base-100">
+        <option value="" {{ if eq (index .Intake "book_form") "" }}selected{{ end }}>Choose a genre</option>
+        <option value="romance" {{ if eq (index .Intake "book_form") "romance" }}selected{{ end }}>Romance / Category Romance</option>
+        <option value="mystery" {{ if eq (index .Intake "book_form") "mystery" }}selected{{ end }}>Mystery / Cozy Mystery</option>
+        <option value="thriller" {{ if eq (index .Intake "book_form") "thriller" }}selected{{ end }}>Thriller / Suspense</option>
+        <option value="fantasy" {{ if eq (index .Intake "book_form") "fantasy" }}selected{{ end }}>Fantasy</option>
+        <option value="scifi" {{ if eq (index .Intake "book_form") "scifi" }}selected{{ end }}>Science Fiction</option>
+        <option value="literary" {{ if eq (index .Intake "book_form") "literary" }}selected{{ end }}>Literary / Book Club</option>
+        <option value="ya" {{ if eq (index .Intake "book_form") "ya" }}selected{{ end }}>Young Adult</option>
+        <option value="childrens" {{ if eq (index .Intake "book_form") "childrens" }}selected{{ end }}>Children's</option>
+        <option value="horror" {{ if eq (index .Intake "book_form") "horror" }}selected{{ end }}>Horror</option>
+        <option value="adventure" {{ if eq (index .Intake "book_form") "adventure" }}selected{{ end }}>Adventure / Quest</option>
+    </select>
+    <p class="text-[11px] text-base-content/60">Examples: category romance, mystery, thriller, fantasy, sci-fi, book club fiction, YA, or children's fiction.</p>
+</div>
+<div class="form-control gap-1">
+    <div class="flex items-center gap-2">
+        <label class="label-text font-semibold">Story Premise</label>
+        <div class="tooltip tooltip-right" data-tip="Write the core dramatic setup in one sentence. This drives the Book Brief and chapter direction.">
+            <span class="badge badge-ghost badge-sm">?</span>
+        </div>
+    </div>
+    <textarea class="textarea textarea-bordered text-sm bg-base-100" name="core_topic" placeholder="In one sentence, what happens in this story?"></textarea>
+</div>
+<div class="form-control gap-1">
+    <div class="flex items-center gap-2">
+        <label class="label-text font-semibold">Who Is It For?</label>
+        <div class="tooltip tooltip-right" data-tip="Name the reader most likely to love this story. Specific is better than broad.">
+            <span class="badge badge-ghost badge-sm">?</span>
+        </div>
+    </div>
+    <textarea id="target_audience" class="textarea textarea-bordered text-sm bg-base-100" name="target_audience" placeholder="For example: readers who love slow-burn romance, twisty thrillers, or epic fantasy"></textarea>
+    <div class="mt-1 flex flex-wrap gap-2">
+        <button type="button" class="btn btn-xs btn-outline btn-secondary font-bold" title="Suggest a reader profile that fits this premise." hx-post="/api/project/{{ .ID }}/escape-hatch?field=target_audience" hx-target="#target_audience" hx-swap="outerHTML">Suggest Reader</button>
+    </div>
+    <p class="text-[11px] text-base-content/60">If you don’t know, let the app suggest a reader profile based on the premise.</p>
+</div>
 <div class="form-control">
     <div class="flex justify-between items-center mb-1 gap-2">
-        <label class="label-text font-semibold">Reader Emotional Pull</label>
-        <button type="button" class="btn btn-xs btn-outline btn-secondary font-bold" hx-post="/api/project/{{ .ID }}/escape-hatch?field=reader_hunger" hx-target="#hunger-textarea" hx-swap="outerHTML">Surprise Me</button>
+        <div class="flex items-center gap-2">
+            <label class="label-text font-semibold">Why Do They Care?</label>
+            <div class="tooltip tooltip-right" data-tip="What feeling or promise keeps the reader turning pages?">
+                <span class="badge badge-ghost badge-sm">?</span>
+            </div>
+        </div>
+        <button type="button" class="btn btn-xs btn-outline btn-secondary font-bold" title="Generate premise-aware wording to help fill this field." hx-post="/api/project/{{ .ID }}/escape-hatch?field=reader_hunger" hx-target="#reader_hunger" hx-swap="outerHTML">Show a Hint</button>
     </div>
-    <textarea id="hunger-textarea" name="reader_hunger" class="textarea textarea-bordered h-24 text-sm bg-base-100" placeholder="What emotional experience should pull the reader through?"></textarea>
+    <textarea id="reader_hunger" name="reader_hunger" class="textarea textarea-bordered h-24 text-sm bg-base-100" placeholder="What feeling, promise, or problem keeps the reader hooked?"></textarea>
+    <p class="text-[11px] text-base-content/60">This button gives you starter ideas; nothing is saved until you save the intake.</p>
 </div>
-<textarea class="textarea textarea-bordered text-sm bg-base-100" name="prohibited_directions" placeholder="What genre traps or story directions should be avoided?"></textarea>
-<textarea class="textarea textarea-bordered text-sm bg-base-100" name="author_intent" placeholder="What should linger after the final page?"></textarea>
-<input class="input input-bordered input-sm bg-base-100" name="selected_tone" placeholder="Tone, e.g. Lyrical, Tense, Wry" />
+<div class="form-control gap-1">
+    <div class="flex items-center gap-2">
+        <label class="label-text font-semibold">Point of View</label>
+        <div class="tooltip tooltip-right" data-tip="Choose how the story is narrated. First person feels intimate; third person is more flexible.">
+            <span class="badge badge-ghost badge-sm">?</span>
+        </div>
+    </div>
+    <select name="narrative_pov" class="select select-bordered select-sm w-full bg-base-100">
+        <option value="" {{ if eq (index .Intake "narrative_pov") "" }}selected{{ end }}>Choose a POV</option>
+        <option value="first_person" {{ if eq (index .Intake "narrative_pov") "first_person" }}selected{{ end }}>First Person - "I" / immediate voice</option>
+        <option value="third_limited" {{ if eq (index .Intake "narrative_pov") "third_limited" }}selected{{ end }}>Third Person Limited - one character close-up</option>
+        <option value="third_omniscient" {{ if eq (index .Intake "narrative_pov") "third_omniscient" }}selected{{ end }}>Third Person Omniscient - broad overview</option>
+        <option value="dual_pov" {{ if eq (index .Intake "narrative_pov") "dual_pov" }}selected{{ end }}>Dual POV - two main voices</option>
+        <option value="second_person" {{ if eq (index .Intake "narrative_pov") "second_person" }}selected{{ end }}>Second Person - "you" / experimental</option>
+    </select>
+    <p class="text-[11px] text-base-content/60">Examples: "I saw the door open" for first person or "She saw the door open" for third person limited.</p>
+</div>
+<div class="form-control gap-1">
+    <div class="flex items-center gap-2">
+        <label class="label-text font-semibold">Story Pattern</label>
+        <div class="tooltip tooltip-right" data-tip="Pick the kind of story engine you want. Some genres work best with a known formula.">
+            <span class="badge badge-ghost badge-sm">?</span>
+        </div>
+    </div>
+    <select name="structure_model" class="select select-bordered select-sm w-full bg-base-100">
+        <option value="" {{ if eq (index .Intake "structure_model") "" }}selected{{ end }}>Choose a pattern</option>
+        <option value="hero_journey" {{ if eq (index .Intake "structure_model") "hero_journey" }}selected{{ end }}>Hero's Journey</option>
+        <option value="three_act" {{ if eq (index .Intake "structure_model") "three_act" }}selected{{ end }}>Three-Act Structure</option>
+        <option value="save_the_cat" {{ if eq (index .Intake "structure_model") "save_the_cat" }}selected{{ end }}>Save the Cat / Beat Sheet</option>
+        <option value="romance_beats" {{ if eq (index .Intake "structure_model") "romance_beats" }}selected{{ end }}>Romance Beat Sheet</option>
+        <option value="mystery_trail" {{ if eq (index .Intake "structure_model") "mystery_trail" }}selected{{ end }}>Mystery / Clue Trail</option>
+        <option value="quest_arc" {{ if eq (index .Intake "structure_model") "quest_arc" }}selected{{ end }}>Quest / Adventure Arc</option>
+        <option value="character_arc" {{ if eq (index .Intake "structure_model") "character_arc" }}selected{{ end }}>Character-Driven Arc</option>
+    </select>
+    <p class="text-[11px] text-base-content/60">Examples: Hero's Journey, Three-Act, romance beats, or a mystery clue trail.</p>
+</div>
+<div class="form-control gap-1">
+    <div class="flex items-center gap-2">
+        <label class="label-text font-semibold">Avoid This</label>
+        <div class="tooltip tooltip-right" data-tip="Use this to block tropes, twists, or directions you do not want.">
+            <span class="badge badge-ghost badge-sm">?</span>
+        </div>
+    </div>
+    <textarea id="avoid-textarea" class="textarea textarea-bordered text-sm bg-base-100" name="prohibited_directions" placeholder="What genre traps or story directions should be avoided?"></textarea>
+    <div class="mt-1 flex flex-wrap gap-2">
+        <button type="button" class="btn btn-xs btn-outline btn-secondary font-bold" title="Suggest specific things this story should avoid." hx-post="/api/project/{{ .ID }}/escape-hatch?field=prohibited_directions" hx-target="#avoid-textarea" hx-swap="outerHTML">Show Avoid Examples</button>
+    </div>
+    <p class="text-[11px] text-base-content/60">Think of this as a guardrail list: wrong tropes, wrong tone, wrong pace, or the wrong amount of detail.</p>
+</div>
+<div class="form-control gap-1">
+    <div class="flex items-center gap-2">
+        <label class="label-text font-semibold">Ending Effect</label>
+        <div class="tooltip tooltip-right" data-tip="What should stay with the reader after the final page.">
+            <span class="badge badge-ghost badge-sm">?</span>
+        </div>
+    </div>
+    <textarea class="textarea textarea-bordered text-sm bg-base-100" name="author_intent" placeholder="What should linger after the final page?"></textarea>
+    <p class="text-[11px] text-base-content/60">This is the ending effect. Use it to tell the app what the story should leave behind.</p>
+</div>
+<div class="form-control gap-1">
+    <div class="flex items-center gap-2">
+        <label class="label-text font-semibold">Tone</label>
+        <div class="tooltip tooltip-right" data-tip="A short style label for the voice of the story.">
+            <span class="badge badge-ghost badge-sm">?</span>
+        </div>
+    </div>
+    <input class="input input-bordered input-sm bg-base-100" name="selected_tone" placeholder="Tone, e.g. Lyrical, Tense, Wry" />
+    <p class="text-[11px] text-base-content/60">Example tones: lyrical, tense, witty, intimate, ominous, hopeful.</p>
+</div>
 {{- end }}
 
 {{ define "empty_workspace" -}}
@@ -270,10 +599,127 @@ const templateSource = `
             <div class="text-xs font-semibold opacity-80">Book Prototype Architect</div>
         </div>
         {{ if .IntakeSaved }}
-        <div class="alert alert-success mt-6">Intake saved. Next: use Fast Track Autopilot to generate the blueprint and chapter shells.</div>
+        <div class="alert alert-success mt-6">Intake saved. Next: generate the Book Brief, review it, then move to the outline and chapter shells.</div>
         {{ else }}
-        <div class="alert alert-info mt-6">Fill the intake fields, save them, then generate the blueprint and chapter shells.</div>
+        <div class="alert alert-info mt-6">Fill the intake fields, save them, then generate the Book Brief.</div>
         {{ end }}
+    </div>
+</div>
+{{- end }}
+
+{{ define "brief_workspace" -}}
+<div class="card bg-base-100 shadow border border-base-300 flex-1 overflow-hidden">
+    <div class="card-body overflow-y-auto">
+        <div class="alert alert-info py-2 px-3 text-xs leading-relaxed mb-3">
+            <span><span class="font-bold">Book Brief:</span> this is the checkpoint before outline generation. If it looks off, change the intake and regenerate.</span>
+        </div>
+        <div class="mx-auto w-52 max-w-full rounded-lg bg-primary text-primary-content shadow-xl p-5 aspect-[2/3] flex flex-col justify-between">
+            <div>
+                <div class="text-xs font-black uppercase opacity-80">Working Title</div>
+                <h2 class="text-2xl font-black leading-tight mt-3">{{ .Brief.Title }}</h2>
+                <p class="text-xs font-semibold mt-3 opacity-80">{{ .Brief.Subtitle }}</p>
+            </div>
+            <div class="text-xs font-semibold opacity-80">Book Brief</div>
+        </div>
+
+        <div class="divider">Book Brief</div>
+        <div class="space-y-3 text-sm">
+            <div>
+                <h3 class="font-black uppercase text-xs text-base-content/60">Promise</h3>
+                <p class="leading-relaxed">{{ .Brief.Promise }}</p>
+            </div>
+            <div>
+                <h3 class="font-black uppercase text-xs text-base-content/60">Voice Tone</h3>
+                <p class="leading-relaxed">{{ .Brief.VoiceTone }}</p>
+            </div>
+            <div>
+                <h3 class="font-black uppercase text-xs text-base-content/60">What It Is</h3>
+                <p class="leading-relaxed">{{ .Brief.WhatItIs }}</p>
+            </div>
+            <div>
+                <h3 class="font-black uppercase text-xs text-base-content/60">What It Is Not</h3>
+                <p class="leading-relaxed">{{ .Brief.WhatItIsNot }}</p>
+            </div>
+            <div class="bg-base-200 border border-base-300 rounded-lg p-3">
+                <h3 class="font-black uppercase text-xs text-base-content/60">Structural Suggestions</h3>
+                <p class="leading-relaxed whitespace-pre-wrap">{{ .Brief.AISuggestions }}</p>
+            </div>
+        </div>
+    </div>
+</div>
+{{- end }}
+
+{{ define "workspace_tabs" -}}
+<div class="tabs tabs-lift bg-base-100 flex-1 overflow-hidden">
+    {{ if .Brief }}
+    <input type="radio" name="workspace_tabs_{{ .Project.ID }}" class="tab text-xs font-bold" aria-label="Book Brief" {{ if eq .WorkspaceTab "brief" }}checked{{ end }} />
+    <div class="tab-content bg-base-100 border-base-300 p-4 overflow-y-auto">
+        {{ template "brief_workspace" . }}
+    </div>
+    {{ end }}
+
+    {{ if .Chapters }}
+    <input type="radio" name="workspace_tabs_{{ .Project.ID }}" class="tab text-xs font-bold" aria-label="Outline" {{ if eq .WorkspaceTab "outline" }}checked{{ end }} />
+    <div class="tab-content bg-base-100 border-base-300 p-4 overflow-y-auto">
+        {{ template "outline_workspace" . }}
+    </div>
+    {{ end }}
+
+    {{ if .Chapter }}
+    <input type="radio" name="workspace_tabs_{{ .Project.ID }}" class="tab text-xs font-bold" aria-label="Drafting" {{ if eq .WorkspaceTab "drafting" }}checked{{ end }} />
+    <div class="tab-content bg-base-100 border-base-300 p-4 overflow-y-auto">
+        {{ template "chapter_cockpit" . }}
+    </div>
+    {{ end }}
+</div>
+{{- end }}
+
+{{ define "outline_workspace" -}}
+<div class="card bg-base-100 shadow border border-base-300 flex-1 overflow-hidden">
+    <div class="card-body overflow-y-auto">
+        <div class="alert alert-info py-2 px-3 text-xs leading-relaxed mb-3">
+            <span><span class="font-bold">Outline view:</span> these chapter cards are the current table of contents. They show what the app plans to draft next.</span>
+        </div>
+        <div class="flex items-start justify-between gap-4">
+            <div>
+                <h2 class="card-title text-xl font-black">Outline</h2>
+                <p class="text-sm text-base-content/70">Review the chapter plan before drafting. These cards are the working table of contents.</p>
+            </div>
+            <span class="badge badge-primary font-mono uppercase">{{ .Project.Status }}</span>
+        </div>
+
+        {{ if .Brief }}
+        <div class="collapse collapse-arrow bg-base-200 border border-base-300 rounded-lg mt-4">
+            <input type="checkbox" />
+            <div class="collapse-title font-bold">Brief: {{ .Brief.Title }}</div>
+            <div class="collapse-content text-sm space-y-2">
+                <p><span class="font-bold">Promise:</span> {{ .Brief.Promise }}</p>
+                <p><span class="font-bold">Voice:</span> {{ .Brief.VoiceTone }}</p>
+                <p><span class="font-bold">Boundary:</span> {{ .Brief.WhatItIsNot }}</p>
+            </div>
+        </div>
+        {{ end }}
+
+        <div class="grid gap-3 mt-4">
+            {{ range .Chapters }}
+            <div class="border border-base-300 bg-base-100 rounded-lg p-4">
+                <div class="flex items-start justify-between gap-3">
+                    <div>
+                        <h3 class="font-black">Chapter {{ .SortOrder }}: {{ .Title }}</h3>
+                        <p class="text-sm mt-1 leading-relaxed">{{ .Purpose }}</p>
+                    </div>
+                    <div class="flex flex-col items-end gap-2">
+                        <span class="badge badge-outline font-mono text-[10px] uppercase">{{ .Status }}</span>
+                        <button class="btn btn-xs btn-primary" title="Open this chapter in the drafting cockpit." hx-get="/app/project/{{ $.Project.ID }}/chapters/{{ .ID }}/workspace" hx-target="#workspace-panel">Open</button>
+                    </div>
+                </div>
+            </div>
+            {{ end }}
+        </div>
+
+        <div class="alert alert-info mt-4">
+            <span>Next step: chapter cards still need approve/edit/regenerate controls before drafting uses them as approved structure.</span>
+        </div>
     </div>
 </div>
 {{- end }}
@@ -288,37 +734,69 @@ const templateSource = `
         <span class="badge badge-primary font-mono text-xs font-bold uppercase p-3">{{ .Chapter.Status }}</span>
     </div>
 
+    <div class="bg-base-100 border-b border-base-300 px-4 py-2 flex flex-wrap items-center justify-between gap-2">
+        <div class="flex flex-wrap gap-1">
+            {{ range .Chapters }}
+            <button class="btn btn-xs {{ if eq .ID $.Chapter.ID }}btn-primary{{ else }}btn-outline{{ end }}" title="Open chapter {{ .SortOrder }}." hx-get="/app/project/{{ $.Project.ID }}/chapters/{{ .ID }}/workspace" hx-target="#workspace-panel">{{ .SortOrder }}</button>
+            {{ end }}
+        </div>
+        <div class="flex gap-2">
+            {{ if .PrevChapter }}
+            <button class="btn btn-xs btn-outline" title="Open the previous chapter." hx-get="/app/project/{{ .Project.ID }}/chapters/{{ .PrevChapter.ID }}/workspace" hx-target="#workspace-panel">Previous</button>
+            {{ end }}
+            {{ if .NextChapter }}
+            <button class="btn btn-xs btn-outline" title="Open the next chapter." hx-get="/app/project/{{ .Project.ID }}/chapters/{{ .NextChapter.ID }}/workspace" hx-target="#workspace-panel">Next</button>
+            {{ end }}
+        </div>
+    </div>
+
+    <div class="alert alert-info py-2 px-3 text-xs leading-relaxed mx-4 mt-4">
+        <span><span class="font-bold">How this works:</span> the top tabs show the outputs you have already generated. The bottom buttons run the next stage and then refresh this same screen.</span>
+    </div>
+
     <div class="tabs tabs-lifted bg-base-100 px-4 pt-2 shrink-0">
-        <input type="radio" name="cockpit_tabs_{{ .Chapter.ID }}" class="tab text-xs font-bold" aria-label="1. Raw Draft Copy" checked />
+        <input type="radio" name="cockpit_tabs_{{ .Chapter.ID }}" class="tab text-xs font-bold" aria-label="1. Draft" checked />
         <div class="tab-content bg-base-100 border-base-300 p-4 overflow-y-auto max-h-[400px]">
             <div class="prose max-w-none text-sm leading-relaxed whitespace-pre-wrap">{{ .Chapter.RawDraft }}</div>
         </div>
 
-        <input type="radio" name="cockpit_tabs_{{ .Chapter.ID }}" class="tab text-xs font-bold" aria-label="2. Expert Editorial Diagnosis" />
+        <input type="radio" name="cockpit_tabs_{{ .Chapter.ID }}" class="tab text-xs font-bold" aria-label="2. Editor Feedback" />
         <div class="tab-content bg-base-100 border-base-300 p-4 overflow-y-auto max-h-[400px]">
-            <div class="bg-warning/10 border border-warning/30 p-4 rounded-lg text-sm font-mono text-warning-content whitespace-pre-wrap">{{ .Chapter.EditorialDiagnosis }}</div>
-            <div class="mt-4 flex gap-2">
-                <input type="text" id="manual-correction-{{ .Chapter.ID }}" name="user_diagnosis_notes" placeholder="Add manual editorial directives..." class="input input-bordered input-sm flex-1 text-sm" />
-                <button class="btn btn-sm btn-warning font-bold" hx-post="/api/project/{{ .Project.ID }}/chapters/{{ .Chapter.ID }}/pipeline/rewrite" hx-include="#manual-correction-{{ .Chapter.ID }}" hx-target="#chapter-cockpit-{{ .Chapter.ID }}" hx-swap="outerHTML">Override & Rewrite</button>
+            <div class="mb-3 text-xs text-base-content/70 leading-relaxed">
+                This is the editor's critique. It points out weak structure, pacing, voice problems, and places that sound too generic.
             </div>
+            <div class="bg-warning/10 border border-warning/30 p-4 rounded-lg text-sm font-mono text-warning-content whitespace-pre-wrap">{{ .Chapter.EditorialDiagnosis }}</div>
+            <div class="mt-3 text-xs text-base-content/70 leading-relaxed">
+                Use the box below if you want to add notes before rewriting.
+            </div>
+            <div class="mt-4 flex gap-2">
+                <input type="text" id="manual-correction-{{ .Chapter.ID }}" name="user_diagnosis_notes" placeholder="Add your notes before rewriting..." class="input input-bordered input-sm flex-1 text-sm" title="Add your own correction notes before re-running the rewrite step." />
+                <button class="btn btn-sm btn-warning font-bold" title="Apply your notes and regenerate the rewritten chapter." hx-post="/api/project/{{ .Project.ID }}/chapters/{{ .Chapter.ID }}/pipeline/rewrite" hx-include="#manual-correction-{{ .Chapter.ID }}" hx-target="#chapter-cockpit-{{ .Chapter.ID }}" hx-swap="outerHTML">Apply Notes + Rewrite</button>
+            </div>
+            <p class="mt-2 text-xs text-base-content/60 leading-relaxed">This button does two things: it uses the diagnosis plus your notes, then it replaces this cockpit with the rewritten result.</p>
         </div>
 
-        <input type="radio" name="cockpit_tabs_{{ .Chapter.ID }}" class="tab text-xs font-bold" aria-label="3. Targeted Revision" />
+        <input type="radio" name="cockpit_tabs_{{ .Chapter.ID }}" class="tab text-xs font-bold" aria-label="3. Rewrite" />
         <div class="tab-content bg-base-100 border-base-300 p-4 overflow-y-auto max-h-[400px]">
             <div class="prose max-w-none text-sm leading-relaxed whitespace-pre-wrap">{{ .Chapter.TargetedRewrite }}</div>
         </div>
 
-        <input type="radio" name="cockpit_tabs_{{ .Chapter.ID }}" class="tab text-xs font-bold" aria-label="4. Polished Manuscript" />
+        <input type="radio" name="cockpit_tabs_{{ .Chapter.ID }}" class="tab text-xs font-bold" aria-label="4. Final Draft" />
         <div class="tab-content bg-base-100 border-base-300 p-4 overflow-y-auto max-h-[400px]">
             <div class="prose max-w-none text-base leading-relaxed font-serif p-2 bg-base-100 rounded-lg border border-base-200 whitespace-pre-wrap">{{ .Chapter.DraftContent }}</div>
         </div>
     </div>
 
+    <div class="border-t border-base-300 bg-base-100 px-4 py-2 text-[11px] text-base-content/60 font-semibold uppercase tracking-wider flex items-center justify-between">
+        <span>Run controls</span>
+        <span>These buttons create or replace the tabs above</span>
+    </div>
+
     <div class="p-3 bg-base-200 border-t border-base-300 shrink-0 flex flex-wrap justify-end gap-2">
-        <button class="btn btn-xs btn-outline btn-neutral" hx-post="/api/project/{{ .Project.ID }}/chapters/{{ .Chapter.ID }}/pipeline/draft" hx-target="#chapter-cockpit-{{ .Chapter.ID }}" hx-swap="outerHTML">Step 1: Draft</button>
-        <button class="btn btn-xs btn-outline btn-warning" hx-post="/api/project/{{ .Project.ID }}/chapters/{{ .Chapter.ID }}/pipeline/diagnose" hx-target="#chapter-cockpit-{{ .Chapter.ID }}" hx-swap="outerHTML">Step 2: Diagnose</button>
-        <button class="btn btn-xs btn-outline btn-secondary" hx-post="/api/project/{{ .Project.ID }}/chapters/{{ .Chapter.ID }}/pipeline/rewrite" hx-target="#chapter-cockpit-{{ .Chapter.ID }}" hx-swap="outerHTML">Step 3: Revise</button>
-        <button class="btn btn-xs btn-success font-bold" hx-post="/api/project/{{ .Project.ID }}/chapters/{{ .Chapter.ID }}/pipeline/polish" hx-target="#chapter-cockpit-{{ .Chapter.ID }}" hx-swap="outerHTML">Step 4: Polish & Lock</button>
+        <button class="btn btn-xs btn-outline btn-neutral" title="Create the first chapter draft. After this runs, tab 1 changes." hx-post="/api/project/{{ .Project.ID }}/chapters/{{ .Chapter.ID }}/pipeline/draft" hx-target="#chapter-cockpit-{{ .Chapter.ID }}" hx-swap="outerHTML">Draft</button>
+        <button class="btn btn-xs btn-outline btn-warning" title="Generate the editor feedback. After this runs, tab 2 changes." hx-post="/api/project/{{ .Project.ID }}/chapters/{{ .Chapter.ID }}/pipeline/diagnose" hx-target="#chapter-cockpit-{{ .Chapter.ID }}" hx-swap="outerHTML">Feedback</button>
+        <button class="btn btn-xs btn-outline btn-secondary" title="Rewrite the chapter using the feedback and your notes. After this runs, tab 3 changes." hx-post="/api/project/{{ .Project.ID }}/chapters/{{ .Chapter.ID }}/pipeline/rewrite" hx-target="#chapter-cockpit-{{ .Chapter.ID }}" hx-swap="outerHTML">Rewrite</button>
+        <button class="btn btn-xs btn-success font-bold" title="Do the final cleanup pass. After this runs, tab 4 changes." hx-post="/api/project/{{ .Project.ID }}/chapters/{{ .Chapter.ID }}/pipeline/polish" hx-target="#chapter-cockpit-{{ .Chapter.ID }}" hx-swap="outerHTML">Finish</button>
     </div>
 </div>
 {{- end }}
@@ -326,13 +804,35 @@ const templateSource = `
 {{ define "autopilot" -}}
 <div class="card bg-neutral text-neutral-content shadow-xl border border-neutral p-4">
     <div class="card-body p-2 flex flex-col gap-3">
-        <h3 class="card-title text-lg font-black tracking-tight text-primary">Blueprint & Drafting</h3>
-        <p class="text-xs text-neutral-content/80 leading-relaxed">Start with the blueprint, then use the chapter cockpit to draft, diagnose, revise, or polish one step at a time.</p>
-        <button class="btn btn-primary btn-md font-bold shadow w-full mt-2" hx-post="/api/project/{{ .Project.ID }}/generate/blueprint" hx-target="#workspace-panel">Generate Blueprint</button>
+        <h3 class="card-title text-lg font-black tracking-tight text-primary">Build</h3>
+        <p class="text-xs text-neutral-content/80 leading-relaxed">These are the main run buttons. Use them one at a time if you want to inspect each result.</p>
+        <button class="btn btn-primary btn-md font-bold shadow w-full mt-2" title="Generate the reviewable brief from the intake." hx-post="/api/project/{{ .Project.ID }}/generate/brief" hx-target="#workspace-panel">Brief</button>
+        <button class="btn btn-secondary btn-md font-bold shadow w-full" title="Generate the outline after the brief is ready." hx-post="/api/project/{{ .Project.ID }}/generate/toc" hx-target="#workspace-panel">Outline</button>
         <div class="divider my-1 text-neutral-content/50">OR</div>
-        <p class="text-xs text-neutral-content/70 leading-relaxed">Skip review and run every stage across all chapters automatically.</p>
-        <button class="btn btn-outline btn-sm border-neutral-content/40 text-neutral-content" hx-post="/api/project/{{ .Project.ID }}/generate/autopilot" hx-target="#workspace-panel">Full Autopilot</button>
+        <p class="text-xs text-neutral-content/70 leading-relaxed">Auto mode skips the checkpoints and runs the whole pipeline.</p>
+        <button class="btn btn-outline btn-sm border-neutral-content/40 text-neutral-content" title="Run the full pipeline automatically without stopping to review each stage." hx-post="/api/project/{{ .Project.ID }}/generate/autopilot" hx-target="#workspace-panel">Auto</button>
         <div id="project-status"></div>
+    </div>
+</div>
+{{- end }}
+
+{{ define "project_list" -}}
+<div class="card bg-base-100 shadow border border-base-300 p-4">
+    <div class="card-body p-2 flex flex-col gap-3">
+        <div class="flex items-center justify-between gap-2">
+            <h3 class="card-title text-base font-black">Books</h3>
+            <span class="badge badge-ghost">{{ len .AllProjects }}</span>
+        </div>
+        <div class="flex flex-col gap-2">
+            {{ range .AllProjects }}
+            <button class="btn btn-sm h-auto min-h-10 justify-start text-left {{ if eq .ID $.ActiveProjectID }}btn-primary{{ else }}btn-outline{{ end }}" title="Open {{ .Title }}." hx-get="/app/project/select?project_id={{ .ID }}" hx-target="#main-layout-grid" hx-swap="outerHTML">
+                <span class="flex flex-col items-start min-w-0">
+                    <span class="font-bold truncate max-w-full">{{ .Title }}</span>
+                    <span class="text-[10px] opacity-70 uppercase">{{ .Status }} - {{ .BookType }}</span>
+                </span>
+            </button>
+            {{ end }}
+        </div>
     </div>
 </div>
 {{- end }}
@@ -348,15 +848,16 @@ const templateSource = `
 {{- end }}
 
 {{ define "processing" -}}
-<div class="alert alert-info" hx-get="/api/project/{{ .ProjectID }}/status" hx-trigger="every 2s" hx-swap="outerHTML">
+<div class="alert alert-info" {{ if .ChapterID }}hx-get="/api/project/{{ .ProjectID }}/chapters/{{ .ChapterID }}/status"{{ else }}hx-get="/api/project/{{ .ProjectID }}/status"{{ end }} hx-trigger="every 2s" hx-swap="outerHTML">
     <span class="loading loading-spinner loading-sm"></span>
-    <span>{{ .Stage }} is running{{ chapterSuffix .ChapterID }}.</span>
+    <span>Working on {{ stageLabel .Stage }}{{ chapterSuffix .ChapterID }}.</span>
 </div>
 {{- end }}
 
 {{ define "status" -}}
 <div id="project-status" class="alert {{ statusClass .Status }}">
-    <span>{{ .JobType }}: {{ .Status }}{{ chapterSuffix .ChapterID }}</span>
+    {{ if eq .Status "running" }}<span class="loading loading-spinner loading-sm"></span>{{ end }}
+    <span>{{ jobLabel .JobType }}: {{ statusLabel .Status }}{{ chapterSuffix .ChapterID }}{{ if .ErrorMessage }} - {{ .ErrorMessage }}{{ end }}</span>
 </div>
 {{- end }}
 `

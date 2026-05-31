@@ -51,6 +51,13 @@ To maximize user momentum, eliminate choice paralysis, and cultivate deep produc
 * Once a Working Title is captured or generated, it must be rendered inside a visually polished card component that mimics a physical book jacket.
 * **Anti-Monolithic Drafting Rule:** The compilation of long-form chapter blocks must never be a single black-box execution step. The user must be given clear visibility into the distinct text transformation phases (Drafting, Diagnosis, Targeted Revision, and Polishing).
 
+### D. Human Override At Every Stage
+* Every generated artifact must be inspectable before it becomes the basis for the next major stage.
+* The user must be able to accept, edit, reject, or regenerate outputs at each stage: intake, Book Brief, outline, table of contents/chapter shells, draft, diagnosis, rewrite, polish, research, images, and publishing metadata.
+* AI assistance may suggest, diagnose, rewrite, or fill gaps, but it must not silently finalize decisions that affect downstream manuscript structure.
+* Regeneration must preserve prior user decisions or clearly identify what will be replaced.
+* Autopilot must remain an explicit shortcut mode and must never be the default path for a project.
+
 ## 3. Dynamic UI State Rehydration
 * Users must be able to switch between distinct book projects seamlessly using a navigation header dropdown.
 * The application must use a dedicated `ui_state` JSON block saved directly on each `projects` row.

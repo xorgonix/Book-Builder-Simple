@@ -11,6 +11,8 @@ All custom endpoints must be registered within the native `OnServe` event lifecy
 * `POST /api/projects` — Instantiates an empty project record shell with default layout configurations. Returns the full onboarding UI shell.
 * `POST /api/project/{id}/intake` — Parses and validates configuration metrics (`core_topic`, `target_audience`, `reader_hunger`, `prohibited_directions`, `selected_tone`). Maps values to individual rows in the `intake_responses` table. Sets `target_length` and `target_chapters` on the parent project row. Returns an HTMX redirection to render the Book Brief staging screen.
 * `POST /api/project/{id}/escape-hatch?field={fieldName}` — Receives an empty form target parameter. Fires a high-speed, low-token LLM call to generate three contextual, creative suggestions based on current project notes. Returns a localized Tailwind selection snippet that instantly populates the targeted input container.
+* `POST /api/project/{id}/generate/brief` — Generates the Book Brief only. The user must be able to inspect this output before moving on to outline/table-of-contents generation.
+* `POST /api/project/{id}/generate/toc` — Generates the outline/table-of-contents chapter shells from an existing Book Brief. This route must not silently create the Book Brief; if the brief does not exist, it must return a recoverable error telling the user to generate and review the Book Brief first.
 
 ### B. Dual-Speed Processing Endpoints
 To support both fast prototype generation and granular step-by-step editing, the routing engine exposes both Autopilot and Manual cockpit handlers:

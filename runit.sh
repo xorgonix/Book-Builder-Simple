@@ -1,0 +1,3 @@
+gofmt -w main.go internal/**/*.go migrations/*.go
+go test ./...
+go run . serve
