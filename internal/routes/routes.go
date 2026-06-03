@@ -123,7 +123,11 @@ func (s *Server) handleChapterWorkspace(e *core.RequestEvent) error {
 	if err != nil {
 		return e.NotFoundError("chapter not found", err)
 	}
-	return s.renderWorkspace(e, http.StatusOK, project, chapter, "drafting")
+	tab := strings.TrimSpace(e.Request.URL.Query().Get("tab"))
+	if tab == "" {
+		tab = "drafting"
+	}
+	return s.renderWorkspace(e, http.StatusOK, project, chapter, tab)
 }
 
 func (s *Server) handleProjectIntake(e *core.RequestEvent) error {

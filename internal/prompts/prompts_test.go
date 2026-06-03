@@ -59,3 +59,12 @@ func TestFormatMetadataContextOmitsBlankMetadata(t *testing.T) {
 		t.Fatalf("metadata context should document fixed model role policy:\n%s", got)
 	}
 }
+
+func TestFormatContractDetectsCookbook(t *testing.T) {
+	got := FormatContract(ChapterInput{Project: ProjectInput{Intake: map[string]string{"book_form": "cookbook"}}})
+	for _, want := range []string{"cookbook / recipe guide", "Do not write this chapter as essay-only prose", "ingredients", "method steps"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("format contract missing %q:\n%s", want, got)
+		}
+	}
+}

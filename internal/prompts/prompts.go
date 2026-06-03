@@ -223,6 +223,10 @@ BOOK AND CHAPTER METADATA CONTROL LAYER:
 
 %s
 
+FORMAT CONTRACT:
+
+%s
+
 CHAPTER ARCHITECTURAL OBJECTIVE:
 
 - Title: %s
@@ -255,6 +259,7 @@ Execution Constraints:
 Output: Return the complete chapter draft text only. Do not add introductory or concluding assistant commentary.`,
 		FormatBrief(input.Brief),
 		FormatMetadataContext(input),
+		FormatContract(input),
 		input.Title,
 		input.Purpose,
 		input.StateStart,
@@ -399,6 +404,28 @@ func FormatMetadataContext(input ChapterInput) string {
 	add("Generation directives JSON", input.GenerationDirectives)
 	add("Media prompts JSON", input.MediaPromptsJSON)
 	return strings.Join(lines, "\n\n")
+}
+
+func FormatContract(input ChapterInput) string {
+	context := strings.ToLower(strings.Join([]string{
+		input.Project.Intake["book_form"],
+		input.Project.Intake["core_topic"],
+		input.Project.Intake["structure_model"],
+		input.Brief.WhatItIs,
+		input.Brief.AISuggestions,
+		input.Project.BookArchitectureJSON,
+		input.ChapterMetadataJSON,
+		input.GenerationDirectives,
+	}, " "))
+	if strings.Contains(context, "cookbook") || strings.Contains(context, "recipe") || strings.Contains(context, "culinary") {
+		return strings.Join([]string{
+			"Detected format: cookbook / recipe guide.",
+			"Do not write this chapter as essay-only prose.",
+			"Every chapter must include practical cooking structure when relevant: time, yield, equipment, ingredients, prep notes, method steps, texture/doneness cues, variations, serving or plating notes, storage or make-ahead notes, and common mistakes.",
+			"If a chapter teaches a framework rather than one recipe, include at least one usable protocol or mini-recipe with concrete steps.",
+		}, "\n")
+	}
+	return "Use the format implied by the saved book and chapter metadata. If no special format is present, write polished chapter prose."
 }
 
 func ParseBrief(text string) (Brief, error) {

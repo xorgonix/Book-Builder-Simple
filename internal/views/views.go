@@ -919,13 +919,25 @@ const templateSource = `
             {{ range .Chapters }}
             <div class="border border-base-300 bg-base-100 rounded-lg p-4">
                 <div class="flex items-start justify-between gap-3">
-                    <div>
+                    <div class="min-w-0">
                         <h3 class="font-black">Chapter {{ .SortOrder }}: {{ .Title }}</h3>
                         <p class="text-sm mt-1 leading-relaxed">{{ .Purpose }}</p>
+                        <div class="grid gap-1 mt-3 text-xs text-base-content/70">
+                            <p><span class="font-bold">Entry:</span> {{ .StateStart }}</p>
+                            <p><span class="font-bold">Exit:</span> {{ .StateEnd }}</p>
+                        </div>
+                        <div class="flex flex-wrap gap-1 mt-3">
+                            {{ if .ChapterMetadataJSON }}<span class="badge badge-success badge-sm">Chapter metadata</span>{{ else }}<span class="badge badge-warning badge-sm">Needs chapter metadata</span>{{ end }}
+                            {{ if .ArcMetadataJSON }}<span class="badge badge-success badge-sm">Arc</span>{{ else }}<span class="badge badge-ghost badge-sm">No arc</span>{{ end }}
+                            {{ if .ConceptJurisdiction }}<span class="badge badge-success badge-sm">Concepts</span>{{ else }}<span class="badge badge-ghost badge-sm">No concepts</span>{{ end }}
+                            {{ if .GenerationDirectives }}<span class="badge badge-success badge-sm">Directives</span>{{ else }}<span class="badge badge-warning badge-sm">Needs directives</span>{{ end }}
+                            {{ if .MediaPromptsJSON }}<span class="badge badge-info badge-sm">Media prompts</span>{{ else }}<span class="badge badge-ghost badge-sm">No media</span>{{ end }}
+                        </div>
                     </div>
                     <div class="flex flex-col items-end gap-2">
                         <span class="badge badge-outline font-mono text-[10px] uppercase">{{ .Status }}</span>
                         <button class="btn btn-xs btn-primary" title="Open this chapter in the drafting cockpit." hx-get="/app/project/{{ $.Project.ID }}/chapters/{{ .ID }}/workspace" hx-target="#workspace-panel">Open</button>
+                        <button class="btn btn-xs btn-outline" title="Edit metadata for this chapter." hx-get="/app/project/{{ $.Project.ID }}/chapters/{{ .ID }}/workspace?tab=metadata" hx-target="#workspace-panel">Metadata</button>
                     </div>
                 </div>
             </div>
