@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"bookbuilder/internal/config"
 	"bookbuilder/internal/db"
 	"bookbuilder/internal/exporter"
 	"bookbuilder/internal/llm"
@@ -949,7 +950,7 @@ func (s *Server) exportBookData(project *core.Record) (exporter.Book, error) {
 	}
 	author := strings.TrimSpace(project.GetString("author_name"))
 	if author == "" {
-		author = strings.TrimSpace(os.Getenv("BOOK_AUTHOR"))
+		author = strings.TrimSpace(config.Load().GetEnv("book_author"))
 	}
 	book := exporter.Book{
 		ID:          project.Id,
@@ -1018,7 +1019,7 @@ func incompleteExportWarnings(book exporter.Book) []string {
 }
 
 func exportLanguage() string {
-	language := strings.TrimSpace(os.Getenv("BOOK_LANGUAGE"))
+	language := strings.TrimSpace(config.Load().GetEnv("book_language"))
 	if language == "" {
 		return "en"
 	}

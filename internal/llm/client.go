@@ -7,10 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"bookbuilder/internal/config"
 )
 
 type Client interface {
@@ -18,14 +19,15 @@ type Client interface {
 }
 
 func FromEnv() Client {
-	if os.Getenv("LLM_MOCK") == "1" {
+	cfg := config.Load()
+	if cfg.GetEnv("llm_mock") == "1" {
 		return MockClient{}
 	}
-	url := strings.TrimSpace(os.Getenv("LOCAL_LLM_URL"))
+	url := strings.TrimSpace(cfg.GetEnv("local_llm_url"))
 	if url == "" {
-		url = "http://localhost:1234/api/v1/chat"
+		url = "http://localhost:1234/v1/chat/completions"
 	}
-	model := strings.TrimSpace(os.Getenv("LOCAL_LLM_MODEL"))
+	model := strings.TrimSpace(cfg.GetEnv("local_llm_model"))
 	if model == "" {
 		model = "qwen/qwen3.5-9b"
 	}

@@ -15,7 +15,8 @@ Current classification: **local-first prototype with partial production architec
 - Go application embedding PocketBase.
 - PocketBase collections created through Go migrations.
 - HTMX-rendered server views using Tailwind and DaisyUI from CDN.
-- Local LLM adapter driven by environment variables:
+- Local LLM adapter driven by visible local config in `bookbuilder.config`.
+- Environment variables remain optional overrides for runtime config:
   - `LOCAL_LLM_URL`
   - `LOCAL_LLM_MODEL`
   - `LLM_MOCK`
@@ -132,7 +133,8 @@ Current classification: **local-first prototype with partial production architec
 - Export files are written to local disk under `exports/`.
 - Lint report files are written under `exports/reports/`.
 - Style report files are written under `exports/reports/`.
-- Export uses saved `author_name` before falling back to the `BOOK_AUTHOR` environment variable.
+- Export uses saved `author_name` before falling back to `book_author` in `bookbuilder.config`.
+- `BOOK_AUTHOR` remains an optional environment override for the config fallback.
 - Export Book refuses to run while a project job is still active and shows the current running job/progress instead.
 - Export Book blocks by default if any chapter has no manuscript text.
 - The user can explicitly choose to export an incomplete draft anyway.
