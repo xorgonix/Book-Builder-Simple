@@ -51,18 +51,18 @@ type Chapter struct {
 }
 
 type Result struct {
-	Slug           string
-	MarkdownURL    string
-	EPUBURL        string
-	HTMLURL        string
-	LintReportURL  string
-	StyleReportURL string
-	MarkdownPath   string
-	EPUBPath       string
-	HTMLPath       string
-	LintReportPath string
+	Slug            string
+	MarkdownURL     string
+	EPUBURL         string
+	HTMLURL         string
+	LintReportURL   string
+	StyleReportURL  string
+	MarkdownPath    string
+	EPUBPath        string
+	HTMLPath        string
+	LintReportPath  string
 	StyleReportPath string
-	Warnings       []string
+	Warnings        []string
 }
 
 type LintIssue struct {
@@ -192,10 +192,10 @@ func (b Builder) ExportBook(book Book) (Result, error) {
 	}
 
 	result := Result{
-		Slug:           slug,
-		MarkdownURL:    "/exports/" + filepath.Base(mdPath),
-		MarkdownPath:   mdPath,
-		Warnings:       warnings,
+		Slug:         slug,
+		MarkdownURL:  "/exports/" + filepath.Base(mdPath),
+		MarkdownPath: mdPath,
+		Warnings:     warnings,
 	}
 	if options.WriteEPUB {
 		result.EPUBURL = "/exports/" + filepath.Base(epubPath)

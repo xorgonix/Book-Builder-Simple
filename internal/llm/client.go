@@ -45,23 +45,36 @@ type LocalClient struct {
 }
 
 type localRequest struct {
-	Model        string `json:"model"`
-	SystemPrompt string `json:"system_prompt"`
-	Input        string `json:"input"`
+	Model       string         `json:"model"`
+	Messages    []localMessage `json:"messages"`
+	Temperature float64        `json:"temperature,omitempty"`
 }
 
 type localResponse struct {
+	Choices []struct {
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	} `json:"choices"`
 	Output []struct {
 		Type    string `json:"type"`
 		Content string `json:"content"`
 	} `json:"output"`
 }
 
+type localMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
 func (c *LocalClient) Generate(ctx context.Context, systemPrompt string, input string) (string, error) {
 	body, err := json.Marshal(localRequest{
-		Model:        c.Model,
-		SystemPrompt: systemPrompt,
-		Input:        input,
+		Model: c.Model,
+		Messages: []localMessage{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: input},
+		},
+		Temperature: 0.2,
 	})
 	if err != nil {
 		return "", err
@@ -88,6 +101,11 @@ func (c *LocalClient) Generate(ctx context.Context, systemPrompt string, input s
 	var parsed localResponse
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
 		return "", err
+	}
+	for _, choice := range parsed.Choices {
+		if strings.TrimSpace(choice.Message.Content) != "" {
+			return strings.TrimSpace(choice.Message.Content), nil
+		}
 	}
 	for _, item := range parsed.Output {
 		if strings.TrimSpace(item.Content) != "" {
