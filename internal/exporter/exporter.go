@@ -341,7 +341,8 @@ func CleanChapterWithOptions(chapter Chapter, options ExportOptions) (Chapter, [
 	body, frontMatterIssues := InjectFrontMatter(body, chapter)
 	issues = append(issues, frontMatterIssues...)
 	if options.RenderMediaPromptPlaceholders {
-		body, mediaIssues := InsertMediaPromptPlaceholders(body, chapter)
+		var mediaIssues []LintIssue
+		body, mediaIssues = InsertMediaPromptPlaceholders(body, chapter)
 		issues = append(issues, mediaIssues...)
 	}
 	chapter.Body = body
