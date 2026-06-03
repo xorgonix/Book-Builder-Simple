@@ -29,6 +29,8 @@ type Chapter struct {
 	Subtitle             string
 	FrontMatterLabel     string
 	FrontMatterBlurb     string
+	StateStart           string
+	StateEnd             string
 	ChapterMetadataJSON  string
 	ArcMetadataJSON      string
 	ConceptJurisdiction  string
@@ -933,6 +935,48 @@ const templateSource = `
                             {{ if .GenerationDirectives }}<span class="badge badge-success badge-sm">Directives</span>{{ else }}<span class="badge badge-warning badge-sm">Needs directives</span>{{ end }}
                             {{ if .MediaPromptsJSON }}<span class="badge badge-info badge-sm">Media prompts</span>{{ else }}<span class="badge badge-ghost badge-sm">No media</span>{{ end }}
                         </div>
+                        {{ if or .ChapterMetadataJSON .ArcMetadataJSON .ConceptJurisdiction .GenerationDirectives .MediaPromptsJSON }}
+                        <div class="collapse collapse-arrow bg-base-200 border border-base-300 rounded-lg mt-3">
+                            <input type="checkbox" />
+                            <div class="collapse-title text-xs font-bold uppercase text-base-content/70">Metadata control layer</div>
+                            <div class="collapse-content space-y-3 text-xs">
+                                {{ if .ChapterMetadataJSON }}
+                                <div>
+                                    <p class="font-bold text-base-content/70">Chapter Metadata</p>
+                                    <pre class="whitespace-pre-wrap bg-base-100 border border-base-300 rounded p-2 overflow-x-auto">{{ .ChapterMetadataJSON }}</pre>
+                                </div>
+                                {{ end }}
+
+                                {{ if .ArcMetadataJSON }}
+                                <div>
+                                    <p class="font-bold text-base-content/70">Arc Metadata</p>
+                                    <pre class="whitespace-pre-wrap bg-base-100 border border-base-300 rounded p-2 overflow-x-auto">{{ .ArcMetadataJSON }}</pre>
+                                </div>
+                                {{ end }}
+
+                                {{ if .ConceptJurisdiction }}
+                                <div>
+                                    <p class="font-bold text-base-content/70">Concept Jurisdiction</p>
+                                    <pre class="whitespace-pre-wrap bg-base-100 border border-base-300 rounded p-2 overflow-x-auto">{{ .ConceptJurisdiction }}</pre>
+                                </div>
+                                {{ end }}
+
+                                {{ if .GenerationDirectives }}
+                                <div>
+                                    <p class="font-bold text-base-content/70">Generation Directives</p>
+                                    <pre class="whitespace-pre-wrap bg-base-100 border border-base-300 rounded p-2 overflow-x-auto">{{ .GenerationDirectives }}</pre>
+                                </div>
+                                {{ end }}
+
+                                {{ if .MediaPromptsJSON }}
+                                <div>
+                                    <p class="font-bold text-base-content/70">Media Prompts</p>
+                                    <pre class="whitespace-pre-wrap bg-base-100 border border-base-300 rounded p-2 overflow-x-auto">{{ .MediaPromptsJSON }}</pre>
+                                </div>
+                                {{ end }}
+                            </div>
+                        </div>
+                        {{ end }}
                     </div>
                     <div class="flex flex-col items-end gap-2">
                         <span class="badge badge-outline font-mono text-[10px] uppercase">{{ .Status }}</span>
@@ -975,6 +1019,13 @@ const templateSource = `
             <button class="btn btn-xs btn-outline" title="Open the next chapter." hx-get="/app/project/{{ .Project.ID }}/chapters/{{ .NextChapter.ID }}/workspace" hx-target="#workspace-panel">Next</button>
             {{ end }}
         </div>
+    </div>
+
+    <div class="px-4 pt-3 flex flex-wrap gap-2 text-[11px] font-bold uppercase tracking-wider">
+        <span class="badge {{ if .Chapter.RawDraft }}badge-success{{ else }}badge-ghost{{ end }}">Draft {{ if .Chapter.RawDraft }}done{{ else }}pending{{ end }}</span>
+        <span class="badge {{ if .Chapter.EditorialDiagnosis }}badge-success{{ else }}badge-ghost{{ end }}">Feedback {{ if .Chapter.EditorialDiagnosis }}done{{ else }}pending{{ end }}</span>
+        <span class="badge {{ if .Chapter.TargetedRewrite }}badge-success{{ else }}badge-ghost{{ end }}">Rewrite {{ if .Chapter.TargetedRewrite }}done{{ else }}pending{{ end }}</span>
+        <span class="badge {{ if .Chapter.DraftContent }}badge-success{{ else }}badge-ghost{{ end }}">Finish {{ if .Chapter.DraftContent }}done{{ else }}pending{{ end }}</span>
     </div>
 
     <div class="alert alert-info py-2 px-3 text-xs leading-relaxed mx-4 mt-4">
@@ -1020,6 +1071,7 @@ const templateSource = `
     </div>
 
     <div class="p-3 bg-base-200 border-t border-base-300 shrink-0 flex flex-wrap justify-end gap-2">
+        <button class="btn btn-xs btn-accent font-bold" title="Run draft, feedback, rewrite, and finish in one pass for this chapter." hx-post="/api/project/{{ .Project.ID }}/chapters/{{ .Chapter.ID }}/pipeline/full" hx-target="#chapter-cockpit-{{ .Chapter.ID }}" hx-swap="outerHTML">Run All</button>
         <button class="btn btn-xs btn-outline btn-neutral" title="Create the first chapter draft. After this runs, tab 1 changes." hx-post="/api/project/{{ .Project.ID }}/chapters/{{ .Chapter.ID }}/pipeline/draft" hx-target="#chapter-cockpit-{{ .Chapter.ID }}" hx-swap="outerHTML">Draft</button>
         <button class="btn btn-xs btn-outline btn-warning" title="Generate the editor feedback. After this runs, tab 2 changes." hx-post="/api/project/{{ .Project.ID }}/chapters/{{ .Chapter.ID }}/pipeline/diagnose" hx-target="#chapter-cockpit-{{ .Chapter.ID }}" hx-swap="outerHTML">Feedback</button>
         <button class="btn btn-xs btn-outline btn-secondary" title="Rewrite the chapter using the feedback and your notes. After this runs, tab 3 changes." hx-post="/api/project/{{ .Project.ID }}/chapters/{{ .Chapter.ID }}/pipeline/rewrite" hx-target="#chapter-cockpit-{{ .Chapter.ID }}" hx-swap="outerHTML">Rewrite</button>
@@ -1038,6 +1090,7 @@ const templateSource = `
         <div class="divider my-1 text-neutral-content/50">OR</div>
         <p class="text-xs text-neutral-content/70 leading-relaxed">Auto mode skips the checkpoints and runs the whole pipeline.</p>
         <button class="btn btn-outline btn-sm border-neutral-content/40 text-neutral-content" title="Run the full pipeline automatically without stopping to review each stage." hx-post="/api/project/{{ .Project.ID }}/generate/autopilot" hx-include="#book-setup-form" hx-target="#workspace-panel">Auto</button>
+        <button class="btn btn-sm btn-error text-error-content" title="Force rebuild: regenerate brief, outline, and all chapter stages from scratch." hx-confirm="Force rebuild this entire book from scratch? This will replace the current chapter cards and generated chapter text." hx-post="/api/project/{{ .Project.ID }}/generate/autopilot?force=1" hx-include="#book-setup-form" hx-target="#workspace-panel">Force Rebuild</button>
         <div id="project-status"></div>
     </div>
 </div>

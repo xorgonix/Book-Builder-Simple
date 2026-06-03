@@ -33,6 +33,10 @@ type Server struct {
 	llm llm.Client
 }
 
+type jobRunOptions struct {
+	ForceAutopilot bool
+}
+
 func Register(app *pocketbase.PocketBase) {
 	s := &Server{app: app, llm: llm.FromEnv()}
 
@@ -60,6 +64,7 @@ func Register(app *pocketbase.PocketBase) {
 		se.Router.POST("/api/project/{id}/exports/book", s.handleExportBook)
 		se.Router.POST("/api/project/{id}/chapters/{chapterId}/metadata", s.handleSaveChapterMetadata)
 		se.Router.POST("/api/project/{id}/chapters/{chapterId}/pipeline/{stage}", s.handlePipelineStage)
+		se.Router.POST("/api/project/{id}/chapters/{chapterId}/pipeline/full", s.handleChapterPipelineFull)
 
 		return se.Next()
 	})
@@ -114,6 +119,8 @@ func (s *Server) handleProjectSelect(e *core.RequestEvent) error {
 	if err != nil {
 		return e.NotFoundError("project not found", err)
 	}
+	// Keep browser URL pinned to the active project so HX refreshes never jump to a different book.
+	e.Response.Header().Set("HX-Replace-Url", "/app/project/"+project.Id+"/render")
 	chapter, _ := s.firstChapter(project.Id)
 	return s.renderGrid(e, http.StatusOK, project, chapter)
 }
@@ -435,6 +442,7 @@ func (s *Server) handleAutopilot(e *core.RequestEvent) error {
 	if err != nil {
 		return e.NotFoundError("project not found", err)
 	}
+	forceRebuild := e.Request.URL.Query().Get("force") == "1" || e.Request.FormValue("force") == "1"
 	if err := s.applyProjectSetupFromRequest(e, project); err != nil {
 		return e.BadRequestError("failed to save book setup before running autopilot", err)
 	}
@@ -443,7 +451,7 @@ func (s *Server) handleAutopilot(e *core.RequestEvent) error {
 		return e.InternalServerError("failed to create autopilot job", err)
 	}
 
-	go s.runJob(project.Id, "", job.Id, "autopilot")
+	go s.runJobWithOptions(project.Id, "", job.Id, "autopilot", jobRunOptions{ForceAutopilot: forceRebuild})
 
 	return s.renderProcessing(e, "autopilot", project.Id, "")
 }
@@ -567,6 +575,23 @@ func (s *Server) handlePipelineStage(e *core.RequestEvent) error {
 	return s.renderProcessing(e, stage, projectID, chapterID)
 }
 
+func (s *Server) handleChapterPipelineFull(e *core.RequestEvent) error {
+	projectID := e.Request.PathValue("id")
+	chapterID := e.Request.PathValue("chapterId")
+	chapter, err := s.app.FindRecordById(db.CollectionChapters, chapterID)
+	if err != nil || chapter.GetString("project_id") != projectID {
+		return e.NotFoundError("target chapter does not belong to project", err)
+	}
+	job, err := s.createJob(projectID, chapterID, "chapter_all")
+	if err != nil {
+		return e.InternalServerError("failed to create chapter pipeline job", err)
+	}
+
+	go s.runChapterPipelineFull(projectID, chapterID, job.Id)
+
+	return s.renderProcessing(e, "chapter full run", projectID, chapterID)
+}
+
 func (s *Server) handleProjectStatus(e *core.RequestEvent) error {
 	project, err := s.projectFromPath(e)
 	if err != nil {
@@ -632,7 +657,11 @@ func (s *Server) handleChapterStatus(e *core.RequestEvent) error {
 	}
 	if len(running) > 0 {
 		job := running[0]
-		return s.renderProcessingStatus(e, http.StatusOK, job.GetString("job_type"), project.Id, chapter.Id)
+		stage := job.GetString("job_type")
+		if progress := strings.TrimSpace(job.GetString("error_msg")); progress != "" {
+			stage = progress
+		}
+		return s.renderProcessingStatus(e, http.StatusOK, stage, project.Id, chapter.Id)
 	}
 	latest, err := s.latestJobForChapter(project.Id, chapter.Id)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -1187,10 +1216,14 @@ func (s *Server) createJob(projectID, chapterID, jobType string) (*core.Record, 
 }
 
 func (s *Server) runJob(projectID, chapterID, jobID, jobType string) {
+	s.runJobWithOptions(projectID, chapterID, jobID, jobType, jobRunOptions{})
+}
+
+func (s *Server) runJobWithOptions(projectID, chapterID, jobID, jobType string, options jobRunOptions) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeoutForJob(jobType))
 	defer cancel()
 
-	err := s.executeJob(ctx, projectID, chapterID, jobID, jobType)
+	err := s.executeJob(ctx, projectID, chapterID, jobID, jobType, options)
 	job, findErr := s.app.FindRecordById(db.CollectionJobs, jobID)
 	if findErr != nil {
 		return
@@ -1207,7 +1240,7 @@ func (s *Server) runJob(projectID, chapterID, jobID, jobType string) {
 	_ = s.app.Save(job)
 }
 
-func (s *Server) executeJob(ctx context.Context, projectID, chapterID, jobID, jobType string) error {
+func (s *Server) executeJob(ctx context.Context, projectID, chapterID, jobID, jobType string, options jobRunOptions) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -1238,24 +1271,32 @@ func (s *Server) executeJob(ctx context.Context, projectID, chapterID, jobID, jo
 		}
 		return s.updateProjectStatus(projectID, db.ProjectStatusTOC)
 	case "autopilot":
-		return s.executeAutopilot(ctx, projectID, jobID)
+		return s.executeAutopilot(ctx, projectID, jobID, options.ForceAutopilot)
 	}
 	return s.executePipelineStage(ctx, projectID, chapterID, jobType)
 }
 
-func (s *Server) executeAutopilot(ctx context.Context, projectID string, jobID string) error {
+func (s *Server) executeAutopilot(ctx context.Context, projectID string, jobID string, forceRebuild bool) error {
 	_ = s.updateJobProgress(jobID, "Auto: preparing Book Brief")
 	if err := s.updateProjectStatus(projectID, db.ProjectStatusProcessing); err != nil {
 		return err
 	}
-	if _, err := s.ensureBrief(ctx, projectID); err != nil {
+	if forceRebuild {
+		if _, err := s.generateBrief(ctx, projectID); err != nil {
+			return err
+		}
+	} else if _, err := s.ensureBrief(ctx, projectID); err != nil {
 		return err
 	}
 	_ = s.updateJobProgress(jobID, "Auto: preparing outline")
 	if err := s.updateProjectStatus(projectID, db.ProjectStatusBrief); err != nil {
 		return err
 	}
-	if err := s.ensureTOC(ctx, projectID); err != nil {
+	if forceRebuild {
+		if err := s.rebuildTOC(ctx, projectID); err != nil {
+			return err
+		}
+	} else if err := s.ensureTOC(ctx, projectID); err != nil {
 		return err
 	}
 	if err := s.updateProjectStatus(projectID, db.ProjectStatusTOC); err != nil {
@@ -1279,7 +1320,7 @@ func (s *Server) executeAutopilot(ctx context.Context, projectID string, jobID s
 		return err
 	}
 	for chapterIndex, chapter := range chapters {
-		if strings.TrimSpace(chapter.GetString("draft_content")) != "" && chapter.GetString("status") == db.ChapterStatusCompleted {
+		if !forceRebuild && strings.TrimSpace(chapter.GetString("draft_content")) != "" && chapter.GetString("status") == db.ChapterStatusCompleted {
 			continue
 		}
 		chapterLabel := fmt.Sprintf("chapter %d/%d: %s", chapterIndex+1, len(chapters), chapter.GetString("title"))
@@ -1289,7 +1330,7 @@ func (s *Server) executeAutopilot(ctx context.Context, projectID string, jobID s
 				return err
 			}
 			chapter = latestChapter
-			if stageAlreadyDone(chapter, stage) {
+			if !forceRebuild && stageAlreadyDone(chapter, stage) {
 				continue
 			}
 			select {
@@ -1305,6 +1346,94 @@ func (s *Server) executeAutopilot(ctx context.Context, projectID string, jobID s
 	}
 	_ = s.updateJobProgress(jobID, "Auto: complete")
 	return nil
+}
+
+func (s *Server) runChapterPipelineFull(projectID, chapterID, jobID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeoutForJob("chapter_all"))
+	defer cancel()
+
+	err := s.executeChapterPipelineFull(ctx, projectID, chapterID, jobID)
+	job, findErr := s.app.FindRecordById(db.CollectionJobs, jobID)
+	if findErr != nil {
+		return
+	}
+	job.Set("completed_at", time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		job.Set("status", "failed")
+		job.Set("error_msg", err.Error())
+		_ = s.markProjectFailed(projectID)
+	} else {
+		job.Set("status", "completed")
+		job.Set("error_msg", "")
+	}
+	_ = s.app.Save(job)
+}
+
+func (s *Server) executeChapterPipelineFull(ctx context.Context, projectID, chapterID, jobID string) error {
+	chapter, err := s.app.FindRecordById(db.CollectionChapters, chapterID)
+	if err != nil {
+		return err
+	}
+	if chapter.GetString("project_id") != projectID {
+		return errors.New("chapter project mismatch")
+	}
+	for _, stage := range []string{"draft", "diagnose", "rewrite", "polish"} {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		_ = s.updateJobProgress(jobID, fmt.Sprintf("Chapter run: %s", stageLabelForProgress(stage)))
+		if err := s.executePipelineStage(ctx, projectID, chapterID, stage); err != nil {
+			return err
+		}
+		chapter, err = s.app.FindRecordById(db.CollectionChapters, chapterID)
+		if err != nil {
+			return err
+		}
+	}
+	_ = s.updateJobProgress(jobID, "Chapter run: complete")
+	return nil
+}
+
+func (s *Server) rebuildTOC(ctx context.Context, projectID string) error {
+	project, err := s.projectInputByID(projectID)
+	if err != nil {
+		return err
+	}
+	brief, err := s.briefInput(projectID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return errors.New("book brief must be generated before outline and chapter shells")
+		}
+		return err
+	}
+	plans, err := s.generateTOCChapters(ctx, project, brief)
+	if err != nil {
+		return err
+	}
+
+	existing, err := s.app.FindRecordsByFilter(
+		db.CollectionChapters,
+		"project_id = {:project_id}",
+		"sort_order",
+		0,
+		0,
+		dbx.Params{"project_id": projectID},
+	)
+	if err != nil {
+		return err
+	}
+	for _, chapter := range existing {
+		if err := s.app.Delete(chapter); err != nil {
+			return err
+		}
+	}
+
+	if err := s.saveChapters(projectID, plans); err != nil {
+		return err
+	}
+	return s.seedProjectMetadataDefaults(projectID, project, &brief, plans)
 }
 
 func (s *Server) executePipelineStage(ctx context.Context, projectID, chapterID, stage string) error {
@@ -1326,6 +1455,14 @@ func (s *Server) executePipelineStage(ctx context.Context, projectID, chapterID,
 	if err != nil {
 		return err
 	}
+	prevView, nextView, tocSlim, err := s.chapterContinuityContext(projectID, chapter.GetInt("sort_order"))
+	if err != nil {
+		return err
+	}
+	openingGuard, err := s.openingUniquenessGuard(projectID, chapter.GetInt("sort_order"))
+	if err != nil {
+		return err
+	}
 	chapterInput := prompts.ChapterInput{
 		Project:              project,
 		Brief:                brief,
@@ -1334,6 +1471,9 @@ func (s *Server) executePipelineStage(ctx context.Context, projectID, chapterID,
 		Purpose:              chapter.GetString("purpose"),
 		StateStart:           chapter.GetString("state_start"),
 		StateEnd:             chapter.GetString("state_end"),
+		PreviousChapterView:  prevView,
+		NextChapterView:      nextView,
+		TOCSlimView:          tocSlim,
 		ChapterMetadataJSON:  chapter.GetString("chapter_metadata_json"),
 		ArcMetadataJSON:      chapter.GetString("arc_metadata_json"),
 		ConceptJurisdiction:  chapter.GetString("concept_jurisdiction_json"),
@@ -1342,6 +1482,7 @@ func (s *Server) executePipelineStage(ctx context.Context, projectID, chapterID,
 		RawDraft:             chapter.GetString("raw_draft"),
 		Diagnosis:            chapter.GetString("editorial_diagnosis"),
 		Rewrite:              chapter.GetString("targeted_rewrite"),
+		OpeningGuard:         openingGuard,
 		DraftNotes:           chapter.GetString("user_draft_notes"),
 		DiagnoseNote:         chapter.GetString("user_diagnosis_notes"),
 		RewriteNotes:         chapter.GetString("user_rewrite_notes"),
@@ -1355,6 +1496,9 @@ func (s *Server) executePipelineStage(ctx context.Context, projectID, chapterID,
 		}
 		chapter.Set("status", db.ChapterStatusDraftingStage1)
 		chapter.Set("raw_draft", output)
+		if err := s.attachRepetitionAudit(projectID, chapter, output); err != nil {
+			return err
+		}
 	case "diagnose":
 		if strings.TrimSpace(chapterInput.RawDraft) == "" {
 			return errors.New("draft stage must complete before diagnosis")
@@ -1375,6 +1519,9 @@ func (s *Server) executePipelineStage(ctx context.Context, projectID, chapterID,
 		}
 		chapter.Set("status", db.ChapterStatusDraftingStage3)
 		chapter.Set("targeted_rewrite", output)
+		if err := s.attachRepetitionAudit(projectID, chapter, output); err != nil {
+			return err
+		}
 	case "polish":
 		if strings.TrimSpace(chapterInput.Rewrite) == "" {
 			chapterInput.Rewrite = chapterInput.RawDraft
@@ -1389,6 +1536,9 @@ func (s *Server) executePipelineStage(ctx context.Context, projectID, chapterID,
 		chapter.Set("previous_draft_content", chapter.GetString("draft_content"))
 		chapter.Set("draft_content", output)
 		chapter.Set("status", db.ChapterStatusCompleted)
+		if err := s.attachRepetitionAudit(projectID, chapter, output); err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf("unsupported stage %q", stage)
 	}
@@ -1474,21 +1624,10 @@ func (s *Server) ensureTOC(ctx context.Context, projectID string) error {
 	if err != nil {
 		return err
 	}
-	if len(existing) > 0 {
-		if len(existing) == project.TargetChapters {
-			return nil
-		}
-		for _, chapter := range existing {
-			if chapterHasManuscript(chapter) {
-				return fmt.Errorf("outline already has %d chapters but the project target is %d; review or export existing drafted chapters before regenerating the outline", len(existing), project.TargetChapters)
-			}
-		}
-		for _, chapter := range existing {
-			if err := s.app.Delete(chapter); err != nil {
-				return err
-			}
-		}
+	if len(existing) == project.TargetChapters {
+		return s.seedProjectMetadataDefaults(projectID, project, nil, nil)
 	}
+
 	brief, err := s.briefInput(projectID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1500,7 +1639,56 @@ func (s *Server) ensureTOC(ctx context.Context, projectID string) error {
 	if err != nil {
 		return err
 	}
-	return s.saveChapters(projectID, chapters)
+
+	if len(existing) == 0 {
+		if err := s.saveChapters(projectID, chapters); err != nil {
+			return err
+		}
+		return s.seedProjectMetadataDefaults(projectID, project, &brief, chapters)
+	}
+
+	if project.TargetChapters > len(existing) {
+		existingOrders := make(map[int]bool, len(existing))
+		for _, chapter := range existing {
+			existingOrders[chapter.GetInt("sort_order")] = true
+		}
+		for _, plan := range chapters {
+			if existingOrders[plan.SortOrder] {
+				continue
+			}
+			if err := s.saveChapterPlan(projectID, plan); err != nil {
+				return err
+			}
+		}
+		return s.seedProjectMetadataDefaults(projectID, project, &brief, chapters)
+	}
+
+	// Target is lower than existing count: keep earliest chapters and remove extras.
+	keep := make(map[string]bool, project.TargetChapters)
+	for i, chapter := range existing {
+		if i < project.TargetChapters {
+			keep[chapter.Id] = true
+		}
+	}
+
+	trimmedWithManuscript := 0
+	for _, chapter := range existing {
+		if keep[chapter.Id] {
+			continue
+		}
+		if chapterHasManuscript(chapter) {
+			trimmedWithManuscript++
+		}
+		if err := s.app.Delete(chapter); err != nil {
+			return err
+		}
+	}
+	if trimmedWithManuscript > 0 {
+		s.app.Logger().Warn("trimmed chapters with manuscript while reducing target_chapters", "project_id", projectID, "trimmed_with_manuscript", trimmedWithManuscript)
+	}
+
+	return s.seedProjectMetadataDefaults(projectID, project, &brief, chapters)
+
 }
 
 func (s *Server) generateTOCChapters(ctx context.Context, project prompts.ProjectInput, brief prompts.Brief) ([]prompts.ChapterPlan, error) {
@@ -1534,6 +1722,119 @@ func chapterHasManuscript(chapter *core.Record) bool {
 	return false
 }
 
+func (s *Server) chapterContinuityContext(projectID string, currentSortOrder int) (string, string, string, error) {
+	records, err := s.app.FindRecordsByFilter(
+		db.CollectionChapters,
+		"project_id = {:project_id}",
+		"sort_order",
+		0,
+		0,
+		dbx.Params{"project_id": projectID},
+	)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	prev := ""
+	next := ""
+	tocLines := make([]string, 0, len(records))
+
+	for index, record := range records {
+		sortOrder := record.GetInt("sort_order")
+		title := strings.TrimSpace(record.GetString("title"))
+		purpose := strings.TrimSpace(record.GetString("purpose"))
+		stateStart := strings.TrimSpace(record.GetString("state_start"))
+		stateEnd := strings.TrimSpace(record.GetString("state_end"))
+		line := fmt.Sprintf("%d. %s | purpose: %s | entry: %s | exit: %s", sortOrder, displayOrPlaceholder(title), displayOrPlaceholder(purpose), displayOrPlaceholder(stateStart), displayOrPlaceholder(stateEnd))
+		tocLines = append(tocLines, line)
+
+		if sortOrder != currentSortOrder {
+			continue
+		}
+		if index > 0 {
+			prev = shortChapterSynopsis(records[index-1])
+		}
+		if index+1 < len(records) {
+			next = shortChapterSynopsis(records[index+1])
+		}
+	}
+
+	return strings.TrimSpace(prev), strings.TrimSpace(next), strings.Join(tocLines, "\n"), nil
+}
+
+func shortChapterSynopsis(chapter *core.Record) string {
+	title := strings.TrimSpace(chapter.GetString("title"))
+	purpose := strings.TrimSpace(chapter.GetString("purpose"))
+	stateStart := strings.TrimSpace(chapter.GetString("state_start"))
+	stateEnd := strings.TrimSpace(chapter.GetString("state_end"))
+	body := strings.TrimSpace(bestChapterBody(chapter))
+	if body != "" {
+		if len(body) > 220 {
+			body = body[:220] + "..."
+		}
+		return fmt.Sprintf("%s | purpose: %s | entry: %s | exit: %s | text snippet: %s", displayOrPlaceholder(title), displayOrPlaceholder(purpose), displayOrPlaceholder(stateStart), displayOrPlaceholder(stateEnd), body)
+	}
+	return fmt.Sprintf("%s | purpose: %s | entry: %s | exit: %s", displayOrPlaceholder(title), displayOrPlaceholder(purpose), displayOrPlaceholder(stateStart), displayOrPlaceholder(stateEnd))
+}
+
+func (s *Server) openingUniquenessGuard(projectID string, currentOrder int) (string, error) {
+	records, err := s.app.FindRecordsByFilter(
+		db.CollectionChapters,
+		"project_id = {:project_id} && sort_order < {:sort_order}",
+		"sort_order",
+		0,
+		0,
+		dbx.Params{"project_id": projectID, "sort_order": currentOrder},
+	)
+	if err != nil {
+		return "", err
+	}
+	if len(records) == 0 {
+		return "", nil
+	}
+
+	lines := make([]string, 0, len(records))
+	for _, record := range records {
+		opening := chapterOpeningSignature(bestChapterBody(record))
+		if opening == "" {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("- chapter %d: %s", record.GetInt("sort_order"), opening))
+	}
+	if len(lines) == 0 {
+		return "", nil
+	}
+
+	return "Do not start this chapter with any opening sentence or phrase that closely matches the following:\n" + strings.Join(lines, "\n") + "\nIf the generated opening is too similar, rewrite the opening paragraph before returning the final text.", nil
+}
+
+func chapterOpeningSignature(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	if len(text) > 320 {
+		text = text[:320]
+	}
+	end := strings.IndexAny(text, ".!?\n")
+	if end > 0 {
+		text = text[:end+1]
+	}
+	text = strings.Join(strings.Fields(text), " ")
+	if len(text) > 180 {
+		text = text[:180] + "..."
+	}
+	return strings.TrimSpace(text)
+}
+
+func displayOrPlaceholder(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "(not set)"
+	}
+	return value
+}
+
 func (s *Server) saveBrief(projectID string, brief prompts.Brief) error {
 	record, err := s.app.FindFirstRecordByFilter(
 		db.CollectionBookBriefs,
@@ -1562,24 +1863,206 @@ func (s *Server) saveBrief(projectID string, brief prompts.Brief) error {
 }
 
 func (s *Server) saveChapters(projectID string, plans []prompts.ChapterPlan) error {
-	collection, err := s.app.FindCollectionByNameOrId(db.CollectionChapters)
-	if err != nil {
-		return err
-	}
 	for _, plan := range plans {
-		record := core.NewRecord(collection)
-		record.Set("project_id", projectID)
-		record.Set("sort_order", plan.SortOrder)
-		record.Set("title", plan.Title)
-		record.Set("status", db.ChapterStatusCardApproved)
-		record.Set("purpose", plan.Purpose)
-		record.Set("state_start", plan.StateStart)
-		record.Set("state_end", plan.StateEnd)
-		if err := s.app.Save(record); err != nil {
+		if err := s.saveChapterPlan(projectID, plan); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (s *Server) saveChapterPlan(projectID string, plan prompts.ChapterPlan) error {
+	collection, err := s.app.FindCollectionByNameOrId(db.CollectionChapters)
+	if err != nil {
+		return err
+	}
+	record := core.NewRecord(collection)
+	record.Set("project_id", projectID)
+	record.Set("sort_order", plan.SortOrder)
+	record.Set("title", plan.Title)
+	record.Set("status", db.ChapterStatusCardApproved)
+	record.Set("purpose", plan.Purpose)
+	record.Set("state_start", plan.StateStart)
+	record.Set("state_end", plan.StateEnd)
+	record.Set("chapter_metadata_json", emptyJSONFallback(plan.ChapterMetadataJSON, `{"chapter_function":"","required_elements":[],"avoid":[]}`))
+	record.Set("arc_metadata_json", emptyJSONFallback(plan.ArcMetadataJSON, `{"arc_phase":"","pov_character":"","external_plot_movement":"","internal_shift":"","relationship_shift":"","beats":[]}`))
+	record.Set("concept_jurisdiction_json", emptyJSONFallback(plan.ConceptJurisdiction, `{"owns":[],"may_reference":[],"must_not_reteach":[],"forbidden_phrases":[]}`))
+	record.Set("generation_directives_json", emptyJSONFallback(plan.GenerationDirectives, `{"write_only_prose":true,"required_elements":[],"avoid":[],"revision_notes":""}`))
+	record.Set("media_prompts_json", emptyJSONFallback(plan.MediaPromptsJSON, `{"images":[],"diagrams":[]}`))
+	return s.app.Save(record)
+}
+
+func emptyJSONFallback(value string, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func (s *Server) seedProjectMetadataDefaults(projectID string, project prompts.ProjectInput, brief *prompts.Brief, plans []prompts.ChapterPlan) error {
+	record, err := s.app.FindRecordById(db.CollectionProjects, projectID)
+	if err != nil {
+		return err
+	}
+
+	updated := false
+
+	if strings.TrimSpace(record.GetString("publishing_metadata_json")) == "" {
+		payload := defaultPublishingMetadata(project, brief)
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		record.Set("publishing_metadata_json", string(encoded))
+		updated = true
+	}
+
+	if strings.TrimSpace(record.GetString("book_architecture_json")) == "" {
+		payload := defaultBookArchitectureMetadata(project, brief, plans)
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		record.Set("book_architecture_json", string(encoded))
+		updated = true
+	}
+
+	if strings.TrimSpace(record.GetString("global_style_contract_json")) == "" {
+		payload := defaultStyleContractMetadata(project, brief)
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		record.Set("global_style_contract_json", string(encoded))
+		updated = true
+	}
+
+	if !updated {
+		return nil
+	}
+
+	return s.app.Save(record)
+}
+
+func defaultPublishingMetadata(project prompts.ProjectInput, brief *prompts.Brief) map[string]any {
+	headline := project.Title
+	blurb := project.Intake["core_topic"]
+	bookTypeLabel := strings.TrimSpace(project.BookType)
+	if brief != nil {
+		if strings.TrimSpace(brief.Title) != "" {
+			headline = brief.Title
+		}
+		if strings.TrimSpace(brief.Promise) != "" {
+			blurb = brief.Promise
+		}
+	}
+
+	if strings.TrimSpace(blurb) == "" {
+		blurb = "Working blurb. Update this after reviewing your brief and outline."
+	}
+
+	return map[string]any{
+		"front_cover": map[string]any{
+			"cover_direction": "Signal the core promise clearly and avoid visual clutter.",
+			"title_treatment": "High-contrast, legible title hierarchy.",
+			"visual_motifs":   nonEmptyList(project.Intake["book_form"], project.Intake["structure_model"]),
+			"avoid":           nonEmptyList("generic stock look"),
+		},
+		"back_cover": map[string]any{
+			"headline":       headline,
+			"blurb":          blurb,
+			"bullets":        nonEmptyList(project.Intake["reader_hunger"], project.Intake["author_intent"]),
+			"reader_promise": blurb,
+			"call_to_action": "Start with chapter one and build momentum chapter by chapter.",
+		},
+		"inside_cover": map[string]any{
+			"short_blurb":      blurb,
+			"author_note":      "Draft note: revise once final manuscript voice is locked.",
+			"positioning_note": firstNonEmpty(bookTypeLabel, "book"),
+		},
+		"retail_metadata": map[string]any{
+			"categories":        nonEmptyList(project.Intake["book_form"], bookTypeLabel),
+			"keywords":          nonEmptyList(project.Intake["core_topic"], project.Intake["target_audience"]),
+			"comparison_titles": []string{},
+			"sales_angles":      nonEmptyList(project.Intake["reader_hunger"], project.Intake["author_intent"]),
+		},
+	}
+}
+
+func defaultBookArchitectureMetadata(project prompts.ProjectInput, brief *prompts.Brief, plans []prompts.ChapterPlan) map[string]any {
+	major := make([]string, 0, len(plans))
+	for i, plan := range plans {
+		if i >= 6 {
+			break
+		}
+		if strings.TrimSpace(plan.Title) != "" {
+			major = append(major, plan.Title)
+		}
+	}
+
+	readerJourney := nonEmptyList(project.Intake["reader_hunger"], project.Intake["author_intent"])
+	if brief != nil && strings.TrimSpace(brief.Promise) != "" {
+		readerJourney = nonEmptyList(brief.Promise, project.Intake["author_intent"])
+	}
+
+	return map[string]any{
+		"book_shape":         firstNonEmpty(project.Intake["structure_model"], project.Intake["book_form"], project.BookType),
+		"reader_journey":     readerJourney,
+		"major_sections":     major,
+		"recurring_features": nonEmptyList(project.Intake["selected_tone"]),
+		"through_lines":      nonEmptyList(project.Intake["core_topic"]),
+		"open_loops":         []string{},
+	}
+}
+
+func defaultStyleContractMetadata(project prompts.ProjectInput, brief *prompts.Brief) map[string]any {
+	primaryVoice := nonEmptyList(project.Intake["selected_tone"])
+	if brief != nil && strings.TrimSpace(brief.VoiceTone) != "" {
+		primaryVoice = nonEmptyList(brief.VoiceTone)
+	}
+
+	return map[string]any{
+		"primary_voice":       primaryVoice,
+		"avoid_voice":         nonEmptyList(project.Intake["prohibited_directions"]),
+		"sentence_style":      nonEmptyList("mix short and medium sentences", "favor clarity over ornament"),
+		"formatting_rules":    nonEmptyList("write clean prose", "no markdown headings in chapter body"),
+		"reader_relationship": firstNonEmpty(project.Intake["target_audience"], "Write to one specific reader profile."),
+		"examples_policy":     "Use concrete examples tied to the chapter purpose.",
+		"jargon_policy":       "Use domain terms only when needed and explain them quickly.",
+	}
+}
+
+func nonEmptyList(values ...string) []string {
+	result := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for _, value := range values {
+		parts := strings.FieldsFunc(value, func(r rune) bool {
+			return r == '\n' || r == ';' || r == '|'
+		})
+		for _, part := range parts {
+			trimmed := strings.TrimSpace(part)
+			if trimmed == "" || seen[trimmed] {
+				continue
+			}
+			seen[trimmed] = true
+			result = append(result, trimmed)
+		}
+	}
+	if len(result) == 0 {
+		return []string{}
+	}
+	return result
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func (s *Server) projectInput(record *core.Record) (prompts.ProjectInput, error) {
@@ -1869,6 +2352,140 @@ func stageAlreadyDone(chapter *core.Record, stage string) bool {
 	default:
 		return false
 	}
+}
+
+type repetitionAuditResult struct {
+	MaxOverlap      float64
+	FlaggedChapters []string
+}
+
+func (s *Server) attachRepetitionAudit(projectID string, chapter *core.Record, output string) error {
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return nil
+	}
+	result, err := s.repetitionAudit(projectID, chapter.GetInt("sort_order"), output)
+	if err != nil {
+		return err
+	}
+	if len(result.FlaggedChapters) == 0 {
+		return nil
+	}
+
+	directives := map[string]any{}
+	current := strings.TrimSpace(chapter.GetString("generation_directives_json"))
+	if current != "" {
+		_ = json.Unmarshal([]byte(current), &directives)
+	}
+	if directives == nil {
+		directives = map[string]any{}
+	}
+
+	note := "Repetition audit flagged overlap with " + strings.Join(result.FlaggedChapters, ", ") + "."
+	revisionNotes, _ := directives["revision_notes"].(string)
+	if strings.TrimSpace(revisionNotes) == "" {
+		directives["revision_notes"] = note
+	} else if !strings.Contains(revisionNotes, note) {
+		directives["revision_notes"] = strings.TrimSpace(revisionNotes + "\n" + note)
+	}
+	directives["repetition_audit"] = map[string]any{
+		"max_overlap":      fmt.Sprintf("%.3f", result.MaxOverlap),
+		"flagged_chapters": result.FlaggedChapters,
+		"checked_at":       time.Now().UTC().Format(time.RFC3339),
+	}
+
+	encoded, err := json.MarshalIndent(directives, "", "  ")
+	if err != nil {
+		return err
+	}
+	chapter.Set("generation_directives_json", string(encoded))
+	return nil
+}
+
+func (s *Server) repetitionAudit(projectID string, currentOrder int, output string) (repetitionAuditResult, error) {
+	records, err := s.app.FindRecordsByFilter(
+		db.CollectionChapters,
+		"project_id = {:project_id} && sort_order < {:sort_order}",
+		"sort_order",
+		0,
+		0,
+		dbx.Params{"project_id": projectID, "sort_order": currentOrder},
+	)
+	if err != nil {
+		return repetitionAuditResult{}, err
+	}
+	outputNgrams := wordNgrams(output, 6)
+	if len(outputNgrams) == 0 {
+		return repetitionAuditResult{}, nil
+	}
+
+	result := repetitionAuditResult{}
+	for _, record := range records {
+		candidate := bestChapterBody(record)
+		if strings.TrimSpace(candidate) == "" {
+			continue
+		}
+		candidateNgrams := wordNgrams(candidate, 6)
+		score := ngramOverlap(outputNgrams, candidateNgrams)
+		if score > result.MaxOverlap {
+			result.MaxOverlap = score
+		}
+		if score >= 0.12 {
+			label := fmt.Sprintf("chapter %d (%.0f%% overlap)", record.GetInt("sort_order"), score*100)
+			result.FlaggedChapters = append(result.FlaggedChapters, label)
+		}
+	}
+	return result, nil
+}
+
+func bestChapterBody(record *core.Record) string {
+	for _, field := range []string{"draft_content", "targeted_rewrite", "raw_draft"} {
+		value := strings.TrimSpace(record.GetString(field))
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func wordNgrams(text string, n int) map[string]bool {
+	text = strings.ToLower(text)
+	normalized := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == ' ' {
+			return r
+		}
+		return ' '
+	}, text)
+	tokens := strings.Fields(normalized)
+	if len(tokens) < n {
+		return map[string]bool{}
+	}
+	ngrams := make(map[string]bool, len(tokens)-n+1)
+	for i := 0; i+n <= len(tokens); i++ {
+		gram := strings.Join(tokens[i:i+n], " ")
+		ngrams[gram] = true
+	}
+	return ngrams
+}
+
+func ngramOverlap(a map[string]bool, b map[string]bool) float64 {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	intersection := 0
+	for gram := range a {
+		if b[gram] {
+			intersection++
+		}
+	}
+	denominator := len(a)
+	if len(b) < denominator {
+		denominator = len(b)
+	}
+	if denominator == 0 {
+		return 0
+	}
+	return float64(intersection) / float64(denominator)
 }
 
 func timeoutForJob(jobType string) time.Duration {

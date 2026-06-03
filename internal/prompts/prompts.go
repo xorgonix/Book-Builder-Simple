@@ -33,16 +33,6 @@ type Brief struct {
 }
 
 type ChapterPlan struct {
-	SortOrder  int
-	Title      string
-	Purpose    string
-	StateStart string
-	StateEnd   string
-}
-
-type ChapterInput struct {
-	Project              ProjectInput
-	Brief                Brief
 	SortOrder            int
 	Title                string
 	Purpose              string
@@ -53,9 +43,27 @@ type ChapterInput struct {
 	ConceptJurisdiction  string
 	GenerationDirectives string
 	MediaPromptsJSON     string
+}
+type ChapterInput struct {
+	Project              ProjectInput
+	Brief                Brief
+	SortOrder            int
+	Title                string
+	Purpose              string
+	StateStart           string
+	StateEnd             string
+	PreviousChapterView  string
+	NextChapterView      string
+	TOCSlimView          string
+	ChapterMetadataJSON  string
+	ArcMetadataJSON      string
+	ConceptJurisdiction  string
+	GenerationDirectives string
+	MediaPromptsJSON     string
 	RawDraft             string
 	Diagnosis            string
 	Rewrite              string
+	OpeningGuard         string
 	DraftNotes           string
 	DiagnoseNote         string
 	RewriteNotes         string
@@ -123,6 +131,7 @@ MANUSCRIPT METRICS:
 - Target Chapter Word Count Boundary: %d words per chapter
 
 You must generate exactly %d individual chapter entries. Each entry must be cleanly wrapped inside the active parser markers CHAPTER_START and CHAPTER_END. Do not include any introductory commentary or markdown code blocks.
+Each JSON field must be valid compact JSON on a single line. Do not use markdown fences. Do not leave required JSON fields blank.
 
 CHAPTER_START
 Order: [Sequence Integer starting at 1]
@@ -130,6 +139,11 @@ Title: [A compelling, clear chapter title]
 Purpose: [What the chapter must mechanically accomplish to advance the book's promise]
 Reader Start: [The precise emotional or intellectual frustration of the reader on entry]
 Reader End: [The transformation goal or clarity target of the reader upon exiting this chapter]
+Chapter Metadata JSON: {"chapter_function":"","required_elements":[],"avoid":[]}
+Arc Metadata JSON: {"arc_phase":"","pov_character":"","external_plot_movement":"","internal_shift":"","relationship_shift":"","beats":[]}
+Concept Jurisdiction JSON: {"owns":[],"may_reference":[],"must_not_reteach":[],"forbidden_phrases":[]}
+Generation Directives JSON: {"write_only_prose":true,"required_elements":[],"avoid":[],"revision_notes":""}
+Media Prompts JSON: {"images":[],"diagrams":[]}
 CHAPTER_END`,
 		FormatBrief(brief),
 		project.TargetChapters,
@@ -153,6 +167,9 @@ Rules:
 - The final chapter must have Order: %d.
 - Use one integer Order per chapter.
 - Do not include introductory commentary or markdown code blocks.
+- Each JSON field must be valid compact JSON on a single line.
+- Do not use markdown fences.
+- Do not leave required JSON fields blank.
 
 VERIFIED BOOK BRIEF:
 
@@ -170,6 +187,11 @@ Title: [A compelling, clear chapter title]
 Purpose: [What the chapter must mechanically accomplish to advance the book's promise]
 Reader Start: [The precise emotional or intellectual frustration of the reader on entry]
 Reader End: [The transformation goal or clarity target of the reader upon exiting this chapter]
+Chapter Metadata JSON: {"chapter_function":"","required_elements":[],"avoid":[]}
+Arc Metadata JSON: {"arc_phase":"","pov_character":"","external_plot_movement":"","internal_shift":"","relationship_shift":"","beats":[]}
+Concept Jurisdiction JSON: {"owns":[],"may_reference":[],"must_not_reteach":[],"forbidden_phrases":[]}
+Generation Directives JSON: {"write_only_prose":true,"required_elements":[],"avoid":[],"revision_notes":""}
+Media Prompts JSON: {"images":[],"diagrams":[]}
 CHAPTER_END`,
 		project.TargetChapters,
 		parseError.Error(),
@@ -219,6 +241,14 @@ PROJECT CONTEXT BRIEF:
 
 %s
 
+CHAPTER CONTINUITY CONTEXT:
+
+%s
+
+OPENING UNIQUENESS GUARD (MANDATORY):
+
+%s
+
 BOOK AND CHAPTER METADATA CONTROL LAYER:
 
 %s
@@ -258,6 +288,8 @@ Execution Constraints:
 
 Output: Return the complete chapter draft text only. Do not add introductory or concluding assistant commentary.`,
 		FormatBrief(input.Brief),
+		FormatContinuityContext(input),
+		FormatOpeningGuardContext(input),
 		FormatMetadataContext(input),
 		FormatContract(input),
 		input.Title,
@@ -273,6 +305,10 @@ func BuildDiagnosisPrompt(input ChapterInput) string {
 	return fmt.Sprintf(`Analyze the attached draft chapter from an editor's perspective. Your job is to identify structural issues and areas for improvement before making edits.
 
 PROJECT BRIEF:
+
+%s
+
+CHAPTER CONTINUITY CONTEXT:
 
 %s
 
@@ -304,6 +340,7 @@ Output your analysis using these exact headings:
 - SPECIFIC PASSAGES:
 - PROTECTED ELEMENTS:`,
 		FormatBrief(input.Brief),
+		FormatContinuityContext(input),
 		FormatMetadataContext(input),
 		input.RawDraft,
 	)
@@ -313,6 +350,14 @@ func BuildRewritePrompt(input ChapterInput) string {
 	return fmt.Sprintf(`Rewrite the provided chapter text by applying the targeted editorial fixes outlined in the structural diagnosis and incorporating the user's manual revisions.
 
 PROJECT BRIEF & TARGET INTENT:
+
+%s
+
+CHAPTER CONTINUITY CONTEXT:
+
+%s
+
+OPENING UNIQUENESS GUARD (MANDATORY):
 
 %s
 
@@ -346,6 +391,8 @@ Execution Rewrite Constraints:
 
 Output: Return the rewritten chapter text only. Do not add introductory or concluding commentary.`,
 		FormatBrief(input.Brief),
+		FormatContinuityContext(input),
+		FormatOpeningGuardContext(input),
 		FormatMetadataContext(input),
 		input.Diagnosis,
 		emptyFallback(input.DiagnoseNote),
@@ -355,6 +402,14 @@ Output: Return the rewritten chapter text only. Do not add introductory or concl
 
 func BuildPolishPrompt(input ChapterInput) string {
 	return fmt.Sprintf(`Perform a structural edit on this text to remove common AI writing patterns and stylistic tells.
+
+CHAPTER CONTINUITY CONTEXT:
+
+%s
+
+OPENING UNIQUENESS GUARD (MANDATORY):
+
+%s
 
 METADATA CONTROL LAYER:
 
@@ -379,7 +434,30 @@ Maintain the core arguments, factual elements, metadata boundaries, and tone of 
 
 Do not invent chapter headings, front matter, image metadata, publishing metadata, chapter numbers, or new conceptual ownership.
 
-Output: Return the polished text only.`, FormatMetadataContext(input), input.Rewrite)
+Output: Return the polished text only.`,
+		FormatContinuityContext(input),
+		FormatOpeningGuardContext(input),
+		FormatMetadataContext(input),
+		input.Rewrite,
+	)
+}
+
+func FormatOpeningGuardContext(input ChapterInput) string {
+	guard := strings.TrimSpace(input.OpeningGuard)
+	if guard == "" {
+		return "No prior chapter openings are available. Still avoid generic openers and vary your first paragraph structure."
+	}
+	return guard
+}
+
+func FormatContinuityContext(input ChapterInput) string {
+	lines := []string{
+		"Current chapter order: " + strconv.Itoa(input.SortOrder),
+		"Previous chapter synopsis: " + emptyFallback(input.PreviousChapterView),
+		"Next chapter synopsis: " + emptyFallback(input.NextChapterView),
+		"Slim table of contents:\n" + emptyFallback(input.TOCSlimView),
+	}
+	return strings.Join(lines, "\n")
 }
 
 func FormatMetadataContext(input ChapterInput) string {
@@ -458,7 +536,7 @@ func ParseTOC(text string, expected int) ([]ChapterPlan, error) {
 	plans := make([]ChapterPlan, 0, expected)
 	for _, part := range parts[1:] {
 		entry := strings.Split(part, "CHAPTER_END")[0]
-		values := parseLabelBlock(entry, []string{"Order", "Title", "Purpose", "Reader Start", "Reader End"})
+		values := parseLabelBlock(entry, []string{"Order", "Title", "Purpose", "Reader Start", "Reader End", "Chapter Metadata JSON", "Arc Metadata JSON", "Concept Jurisdiction JSON", "Generation Directives JSON", "Media Prompts JSON"})
 		order, orderRemainder, err := parseOrder(values["Order"])
 		if err != nil || order < 1 {
 			return nil, fmt.Errorf("invalid chapter order in TOC entry %q", values["Order"])
@@ -470,11 +548,16 @@ func ParseTOC(text string, expected int) ([]ChapterPlan, error) {
 			return nil, fmt.Errorf("TOC entry %d missing title or purpose", order)
 		}
 		plans = append(plans, ChapterPlan{
-			SortOrder:  order,
-			Title:      values["Title"],
-			Purpose:    values["Purpose"],
-			StateStart: values["Reader Start"],
-			StateEnd:   values["Reader End"],
+			SortOrder:            order,
+			Title:                values["Title"],
+			Purpose:              values["Purpose"],
+			StateStart:           values["Reader Start"],
+			StateEnd:             values["Reader End"],
+			ChapterMetadataJSON:  values["Chapter Metadata JSON"],
+			ArcMetadataJSON:      values["Arc Metadata JSON"],
+			ConceptJurisdiction:  values["Concept Jurisdiction JSON"],
+			GenerationDirectives: values["Generation Directives JSON"],
+			MediaPromptsJSON:     values["Media Prompts JSON"],
 		})
 	}
 	sort.Slice(plans, func(i, j int) bool { return plans[i].SortOrder < plans[j].SortOrder })
