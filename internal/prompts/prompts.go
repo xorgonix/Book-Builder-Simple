@@ -540,22 +540,16 @@ func parseLabelBlock(text string, labels []string) map[string]string {
 	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
 	current := ""
 	labelSet := make(map[string]bool, len(labels))
+	normalizedLabels := make(map[string]string, len(labels))
 	for _, label := range labels {
 		labelSet[label] = true
+		normalizedLabels[normalizeLabel(label)] = label
 	}
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		found := ""
-		for _, label := range labels {
-			prefix := label + ":"
-			if strings.HasPrefix(trimmed, prefix) {
-				found = label
-				result[label] = strings.TrimSpace(strings.TrimPrefix(trimmed, prefix))
-				break
-			}
-		}
-		if found != "" {
-			current = found
+		if label, value, ok := parseLabelLine(trimmed, normalizedLabels); ok {
+			result[label] = value
+			current = label
 			continue
 		}
 		if current != "" && trimmed != "" && !labelSet[trimmed] {
@@ -566,6 +560,32 @@ func parseLabelBlock(text string, labels []string) map[string]string {
 		}
 	}
 	return result
+}
+
+func parseLabelLine(line string, labels map[string]string) (string, string, bool) {
+	line = strings.TrimSpace(line)
+	line = strings.TrimLeft(line, "-*# \t")
+	line = strings.TrimSpace(line)
+	line = strings.Trim(line, "*_")
+	line = strings.TrimSpace(line)
+	left, right, ok := strings.Cut(line, ":")
+	if !ok {
+		return "", "", false
+	}
+	left = strings.Trim(strings.TrimSpace(left), "*_")
+	label, ok := labels[normalizeLabel(left)]
+	if !ok {
+		return "", "", false
+	}
+	return label, strings.TrimSpace(strings.Trim(strings.TrimSpace(right), "*_")), true
+}
+
+func normalizeLabel(label string) string {
+	label = strings.ToLower(strings.TrimSpace(label))
+	label = strings.ReplaceAll(label, "_", "")
+	label = strings.ReplaceAll(label, " ", "")
+	label = strings.ReplaceAll(label, "-", "")
+	return label
 }
 
 func emptyFallback(value string) string {

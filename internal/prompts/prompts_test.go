@@ -68,3 +68,19 @@ func TestFormatContractDetectsCookbook(t *testing.T) {
 		}
 	}
 }
+
+func TestParseBriefToleratesMarkdownLabels(t *testing.T) {
+	brief, err := ParseBrief(`**Title:** The Test Book
+**Subtitle:** A small test
+- Promise: The reader gets a working brief.
+Voice Tone: Direct
+What It Is: A clear guide.
+What It Is Not: A vague essay.
+AI Suggestions: Keep it practical.`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if brief.Title != "The Test Book" || brief.Promise != "The reader gets a working brief." {
+		t.Fatalf("unexpected parsed brief: %#v", brief)
+	}
+}
