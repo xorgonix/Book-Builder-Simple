@@ -1,6 +1,7 @@
 # Local app data
 pb_data/
 pb_migrations/
+exports/
 
 # Local assistant/editor state
 .agents/

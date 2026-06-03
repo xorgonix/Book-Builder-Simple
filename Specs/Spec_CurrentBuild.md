@@ -27,18 +27,37 @@ Current classification: **local-first prototype with partial production architec
 - `book_briefs`
 - `chapters`
 - `jobs`
+- Existing databases are patched by a follow-up migration so `intake_responses.key` accepts the current setup keys, including `book_form`, `narrative_pov`, and `structure_model`.
+- Existing databases are patched by a follow-up migration so chapters can store optional export metadata: `subtitle`, `front_matter_label`, and `front_matter_blurb`.
+- Existing databases are patched by a follow-up migration so projects and chapters can store the first metadata control layer:
+  - project `author_name`, `publishing_metadata_json`, `book_architecture_json`, and `global_style_contract_json`
+  - chapter `chapter_metadata_json`, `arc_metadata_json`, `concept_jurisdiction_json`, `generation_directives_json`, and `media_prompts_json`
 
 ### User Flow
 
 - New project creation.
 - Project selection from the header dropdown.
+- Named book creation from the Books panel.
+- Project setup form includes an explicit editable book title.
+- Project setup saves show an in-button spinner while saving and a success confirmation after the save completes.
 - Fiction/nonfiction intake toggle.
 - Intake persistence to `intake_responses`.
+- Saved intake values rehydrate into the setup form when the project is reopened.
 - Basic book-jacket style workspace placeholder.
 - Book Brief generation as its own visible stage.
+- Book Brief can be edited and saved after generation.
+- Book Brief saves show an in-button spinner while saving and a success confirmation after the save completes.
+- Saved Book Brief values are used by outline generation, chapter drafting, editing, polishing, and export.
+- Saved metadata is included in chapter draft, diagnosis, rewrite, and polish prompt context without changing the configured local model.
+- Brief, Outline, and Auto actions include the current Book Setup form values, so the chapter-count field is saved before generation starts.
+- Regenerating the Book Brief returns the workspace to the Book Brief tab and clears stale empty outline shells so old chapters do not make the UI look like Outline ran.
 - Outline/table-of-contents chapter shell generation after the Book Brief exists.
 - Outline/table-of-contents results render as a reviewable chapter-shell list with the Book Brief still accessible in the workspace.
+- If the saved chapter target changes before drafting begins, regenerating the outline replaces the old empty chapter shells with the new target count.
+- If drafted chapter content already exists, the app refuses to silently replace the outline with a different chapter count.
 - The center workspace uses tabs for available project artifacts: Book Brief, Outline, and Drafting.
+- The center workspace includes a Metadata tab for editing book-level and selected chapter-level control metadata.
+- Metadata saves show an in-button spinner while saving and a success confirmation after the save completes.
 - Chapter cockpit with visible tabs for:
   - raw draft
   - editorial diagnosis
@@ -50,6 +69,8 @@ Current classification: **local-first prototype with partial production architec
   - revise
   - polish
 - Autopilot route that can run the full pipeline.
+- Export Book control that produces local Markdown, rendered HTML preview, EPUB, lint report, and style report files under `exports/`.
+- Download/open links for the generated EPUB, HTML preview, Markdown source, lint report, and style report.
 
 ### Async Behavior
 
@@ -89,6 +110,39 @@ Current classification: **local-first prototype with partial production architec
 - Jobs are tracked in the database.
 - Execution is not yet handled by a bounded worker queue.
 - There are no production-grade per-user caps, backoff rules, cancellation controls, or durable retry policies.
+
+### Exports
+
+- First-pass book export exists.
+- Markdown, rendered HTML preview, EPUB, JSON lint report, and JSON style report files are generated synchronously from the current chapter records.
+- Export cleanup is deterministic and does not regenerate prose.
+- Export cleanup does not write cleaned manuscript text back into PocketBase.
+- Export cleanup uses PocketBase chapter order and chapter title fields as canonical truth.
+- Export cleanup strips duplicate generated chapter headings only from the beginning of chapter prose.
+- Export cleanup normalizes Markdown spacing and obvious simple list formatting.
+- Export cleanup detects large duplicated blocks across chapters and writes them to the lint report.
+- Export linting validates optional chapter metadata JSON fields without failing the export.
+- Export linting reports concept-jurisdiction forbidden phrase matches when chapter metadata defines them.
+- Export linting reports repeated stock/watchlist phrases.
+- Export style reporting records basic per-chapter metrics including word count, sentence length, paragraph length, question count, em dash count, bullet count, repeated sentence openers, and watchlist phrase matches.
+- Chapter body fallback order is:
+  - `draft_content`
+  - `targeted_rewrite`
+  - `raw_draft`
+- Export files are written to local disk under `exports/`.
+- Lint report files are written under `exports/reports/`.
+- Style report files are written under `exports/reports/`.
+- Export uses saved `author_name` before falling back to the `BOOK_AUTHOR` environment variable.
+- Export Book refuses to run while a project job is still active and shows the current running job/progress instead.
+- Export Book blocks by default if any chapter has no manuscript text.
+- The user can explicitly choose to export an incomplete draft anyway.
+- Export history is not yet stored in an `exports` collection.
+- EPUB output is intentionally simple and reflowable.
+- HTML preview output is intended as the primary browser reading surface; Markdown remains the clean source/archive output.
+- Optional chapter metadata fields can inject front matter into exports when present.
+- Image/media prompt metadata can be stored. Export can render prompt-only media placeholders when that option is enabled, but no image generation backend is implemented in this build.
+- The default local model remains `qwen/qwen3.5-9b`; model roles are prompt roles, not provider/model switches.
+- Cover images, ISBNs, publisher metadata, DOCX, and PDF are not yet implemented.
 
 ## 4. Not Implemented Yet
 
@@ -133,7 +187,7 @@ Current classification: **local-first prototype with partial production architec
 - Chapter image planning.
 - Integration with image backends such as ComfyUI, Stable Diffusion, Qwen image tooling, or remote image APIs.
 
-### Book Metadata And Export System
+### Book Metadata
 
 - Ebook metadata.
 - Cover metadata.
@@ -141,9 +195,8 @@ Current classification: **local-first prototype with partial production architec
 - Keywords and categories.
 - Formatting requirements.
 - Typography and color system.
-- Export profiles.
 - ISBN/publisher fields.
-- Front matter and back matter management.
+- Full front matter and back matter management.
 
 ## 5. Current User Guidance
 

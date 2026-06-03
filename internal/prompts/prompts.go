@@ -10,12 +10,16 @@ import (
 )
 
 type ProjectInput struct {
-	ID             string
-	Title          string
-	BookType       string
-	TargetLength   string
-	TargetChapters int
-	Intake         map[string]string
+	ID                      string
+	Title                   string
+	BookType                string
+	TargetLength            string
+	TargetChapters          int
+	Intake                  map[string]string
+	AuthorName              string
+	PublishingMetadataJSON  string
+	BookArchitectureJSON    string
+	GlobalStyleContractJSON string
 }
 
 type Brief struct {
@@ -37,19 +41,24 @@ type ChapterPlan struct {
 }
 
 type ChapterInput struct {
-	Project      ProjectInput
-	Brief        Brief
-	SortOrder    int
-	Title        string
-	Purpose      string
-	StateStart   string
-	StateEnd     string
-	RawDraft     string
-	Diagnosis    string
-	Rewrite      string
-	DraftNotes   string
-	DiagnoseNote string
-	RewriteNotes string
+	Project              ProjectInput
+	Brief                Brief
+	SortOrder            int
+	Title                string
+	Purpose              string
+	StateStart           string
+	StateEnd             string
+	ChapterMetadataJSON  string
+	ArcMetadataJSON      string
+	ConceptJurisdiction  string
+	GenerationDirectives string
+	MediaPromptsJSON     string
+	RawDraft             string
+	Diagnosis            string
+	Rewrite              string
+	DraftNotes           string
+	DiagnoseNote         string
+	RewriteNotes         string
 }
 
 const systemPrompt = "You are a precise book architecture engine. Follow the requested output contract exactly. Never wrap structural outputs in Markdown code fences."
@@ -129,6 +138,48 @@ CHAPTER_END`,
 	)
 }
 
+func BuildTOCRepairPrompt(project ProjectInput, brief Brief, previousOutput string, parseError error) string {
+	return fmt.Sprintf(`Your previous Table of Contents did not satisfy the required chapter count.
+
+REQUIRED CHAPTER COUNT: %d
+PARSER ERROR: %s
+
+Regenerate the entire Table of Contents now.
+
+Rules:
+- Output exactly %d CHAPTER_START / CHAPTER_END blocks.
+- Do not summarize, skip, combine, or omit chapters.
+- The first chapter must have Order: 1.
+- The final chapter must have Order: %d.
+- Use one integer Order per chapter.
+- Do not include introductory commentary or markdown code blocks.
+
+VERIFIED BOOK BRIEF:
+
+%s
+
+PREVIOUS INVALID OUTPUT:
+
+%s
+
+Required output format:
+
+CHAPTER_START
+Order: [Sequence Integer starting at 1]
+Title: [A compelling, clear chapter title]
+Purpose: [What the chapter must mechanically accomplish to advance the book's promise]
+Reader Start: [The precise emotional or intellectual frustration of the reader on entry]
+Reader End: [The transformation goal or clarity target of the reader upon exiting this chapter]
+CHAPTER_END`,
+		project.TargetChapters,
+		parseError.Error(),
+		project.TargetChapters,
+		project.TargetChapters,
+		FormatBrief(brief),
+		previousOutput,
+	)
+}
+
 func BuildEscapeHatchPrompt(project ProjectInput, field string) string {
 	return fmt.Sprintf(`Return three concise, high-quality suggestions for the intake field %q.
 
@@ -168,6 +219,10 @@ PROJECT CONTEXT BRIEF:
 
 %s
 
+BOOK AND CHAPTER METADATA CONTROL LAYER:
+
+%s
+
 CHAPTER ARCHITECTURAL OBJECTIVE:
 
 - Title: %s
@@ -185,6 +240,10 @@ Generate this as a fully developed chapter. Do not output abbreviated summaries 
 Execution Constraints:
 
 - Honor the structural path laid out in the outline, but ensure the narrative flows naturally.
+- Write only the prose field for this chapter.
+- Do not output metadata, JSON, YAML, front matter, title pages, or chapter headings.
+- Do not invent chapter numbers, chapter titles, subtitle metadata, image metadata, or publishing metadata.
+- Obey the chapter function, arc role, concept jurisdiction, required elements, and avoid lists when they are provided in metadata.
 - Use smooth transitions instead of mechanical or textbook phrasing.
 - Vary sentence length and paragraph structures to create an engaging rhythm.
 - The prose must feel authored by a single person, not assembled by a machine.
@@ -195,6 +254,7 @@ Execution Constraints:
 
 Output: Return the complete chapter draft text only. Do not add introductory or concluding assistant commentary.`,
 		FormatBrief(input.Brief),
+		FormatMetadataContext(input),
 		input.Title,
 		input.Purpose,
 		input.StateStart,
@@ -208,6 +268,10 @@ func BuildDiagnosisPrompt(input ChapterInput) string {
 	return fmt.Sprintf(`Analyze the attached draft chapter from an editor's perspective. Your job is to identify structural issues and areas for improvement before making edits.
 
 PROJECT BRIEF:
+
+%s
+
+METADATA CONTROL LAYER:
 
 %s
 
@@ -235,6 +299,7 @@ Output your analysis using these exact headings:
 - SPECIFIC PASSAGES:
 - PROTECTED ELEMENTS:`,
 		FormatBrief(input.Brief),
+		FormatMetadataContext(input),
 		input.RawDraft,
 	)
 }
@@ -243,6 +308,10 @@ func BuildRewritePrompt(input ChapterInput) string {
 	return fmt.Sprintf(`Rewrite the provided chapter text by applying the targeted editorial fixes outlined in the structural diagnosis and incorporating the user's manual revisions.
 
 PROJECT BRIEF & TARGET INTENT:
+
+%s
+
+METADATA CONTROL LAYER:
 
 %s
 
@@ -261,6 +330,8 @@ ORIGINAL CHAPTER TEXT:
 Execution Rewrite Constraints:
 
 - Preserve the underlying arguments, chapter sequence, and factual claims unless the diagnosis explicitly directs a change.
+- Preserve metadata boundaries: do not invent headings, chapter numbers, media metadata, publishing metadata, or new conceptual ownership.
+- Respect concept jurisdiction, arc metadata, required elements, and avoid lists when provided.
 - Significantly improve sentence variety, rhythmic flow, and narrative clarity.
 - Completely remove generic, uninspired AI phrasing patterns.
 - Ensure the prose reads like a single voice with a clear perspective.
@@ -270,6 +341,7 @@ Execution Rewrite Constraints:
 
 Output: Return the rewritten chapter text only. Do not add introductory or concluding commentary.`,
 		FormatBrief(input.Brief),
+		FormatMetadataContext(input),
 		input.Diagnosis,
 		emptyFallback(input.DiagnoseNote),
 		input.RawDraft,
@@ -278,6 +350,10 @@ Output: Return the rewritten chapter text only. Do not add introductory or concl
 
 func BuildPolishPrompt(input ChapterInput) string {
 	return fmt.Sprintf(`Perform a structural edit on this text to remove common AI writing patterns and stylistic tells.
+
+METADATA CONTROL LAYER:
+
+%s
 
 TARGET TEXT:
 
@@ -294,9 +370,35 @@ Identify and eliminate these specific issues:
 - Conclusion-heavy paragraphs that repeat previous points.
 - Smooth sentences that lack real substance or punch.
 
-Maintain the core arguments, factual elements, and tone of the draft. Do not add casual filler text, jokes, or synthetic slang. Improve the rhythm, voice authority, and flow of the writing.
+Maintain the core arguments, factual elements, metadata boundaries, and tone of the draft. Do not add casual filler text, jokes, or synthetic slang. Improve the rhythm, voice authority, and flow of the writing.
 
-Output: Return the polished text only.`, input.Rewrite)
+Do not invent chapter headings, front matter, image metadata, publishing metadata, chapter numbers, or new conceptual ownership.
+
+Output: Return the polished text only.`, FormatMetadataContext(input), input.Rewrite)
+}
+
+func FormatMetadataContext(input ChapterInput) string {
+	lines := []string{
+		"Model role: qwen/qwen3.5-9b acting as the current pipeline role. Roles are prompt instructions, not model switches.",
+		"Output boundary: write or evaluate prose only unless the current route explicitly asks for structure.",
+	}
+	add := func(label string, value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		lines = append(lines, label+":\n"+value)
+	}
+	add("Book author / pen name", input.Project.AuthorName)
+	add("Publishing metadata JSON", input.Project.PublishingMetadataJSON)
+	add("Book architecture JSON", input.Project.BookArchitectureJSON)
+	add("Global style contract JSON", input.Project.GlobalStyleContractJSON)
+	add("Chapter metadata JSON", input.ChapterMetadataJSON)
+	add("Arc metadata JSON", input.ArcMetadataJSON)
+	add("Concept jurisdiction JSON", input.ConceptJurisdiction)
+	add("Generation directives JSON", input.GenerationDirectives)
+	add("Media prompts JSON", input.MediaPromptsJSON)
+	return strings.Join(lines, "\n\n")
 }
 
 func ParseBrief(text string) (Brief, error) {
